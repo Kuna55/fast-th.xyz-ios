@@ -64,7 +64,9 @@ final class GameViewController: UIViewController, WKNavigationDelegate, WKUIDele
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.defaultWebpagePreferences.preferredContentMode = .mobile
-        if #available(iOS 16.4, *) { cfg.preferences.isElementFullscreenEnabled = true }
+        // No element full screen: the app already is full screen, and WebKit's would add its own
+        // banner, close button and status bar over the game.  Without it the page (display.ts:
+        // canFullscreen false, fromHomeScreen true) neither asks for it nor shows its button.
         // Safari's user agent: WKWebView sends "... (KHTML, like Gecko) Mobile/15E148" without
         // Safari's "Version/x Safari/604.1", and the page reads the Safari version from it
         let v = ProcessInfo.processInfo.operatingSystemVersion
