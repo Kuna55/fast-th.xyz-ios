@@ -1,5 +1,5 @@
 # Build the nfsu2.xyz client app (client/) on a GitHub Mac, unsigned, and put
-# NFSU2-unsigned.ipa on the "client" release of this (private) repository.
+# NFSU2-unsigned.ipa on the "client" release of this repository.
 # Sign it when you install it: Sideloadly or AltStore with your Apple ID.
 name: client
 on:
