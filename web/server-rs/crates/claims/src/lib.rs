@@ -1,0 +1,708 @@
+//! Claimed names (docs/web/PLAYING.md, "Your name"): a player claims the name it plays under with its keyphrase, the
+//! one that keeps its cloud saves (nfsu2-vault), and while the claim holds nobody else plays under that name: the
+//! Online lobby gives anyone else the name with four digits in place of its end (nfsu2-online lobby.rs), free roam's
+//! hub links nobody else under it (nfsu2-roam hub.rs), and EA Messenger keeps its lists only for a claimed name, with
+//! the keyphrase that claimed it (nfsu2-online buddy.rs).
+//!
+//! - A name is compared in its Online form ([`clean`]: the letters, digits, - and _ of what was typed, any other run
+//!   of characters one _, at most 15, as runtime/online.c makes the game's name), in any case.
+//! - The game's names for nobody in particular ([`UNCLAIMABLE`]: NAME, the default profile name that hundreds of
+//!   players keep, and Player) and a name that reads as a slur (nfsu2-names) are never claimed.
+//! - A claim lasts as long as its keyphrase: [`HOLD_DAYS`] after its owner last played under it ([`Claims::seen`]) or
+//!   used the keyphrase ([`Claims::used`]: its cloud saves read or saved), as long as nfsu2-vault keeps a keyphrase
+//!   nobody uses.
+//! - One name a keyphrase.  Claiming another is a change: the first is free, then one every [`CHANGE_DAYS`]; the
+//!   name before stays the owner's for [`GRACE_DAYS`] more (its friends still have it on their lists for a while).
+//! - The owner is a keyphrase, by a hash of its token ([`owner_of_token`]): the page sends the token where it claims
+//!   (/names) and in its hello to the switch (nfsu2-lan: a frame's `FrameCtx::owner`), never the keyphrase.  A
+//!   keyphrase deleted from the cloud lets its names go ([`Claims::release`]).
+//! - A claim of a name also holds its second form ([`second`]: "Alex" holds "Alex_2"), the name of co-op free roam's
+//!   second player beside its owner on one screen (the page names player 2 "<player 1's Online form> 2"): nobody else
+//!   plays under it ([`Claims::may_use`]) or claims it ([`Claims::claim`]) while the claim holds.  The name is cut to
+//!   [`SECOND_BASE`] characters first, so names of 13, 14 and 15 characters that begin alike have one second form:
+//!   a keyphrase claims none of them while another keyphrase holds one ([`Claims::claim`]: taken).  Claims of before
+//!   that share one (until the 2026-11-05 security audit each of their owners had it, and another keyphrase's claim of
+//!   "Speedracer123x" made it the second player of "Speedracer123") give it to one owner only: the holder of the name
+//!   of 13 itself, else the oldest claim's.  A claim of the second form itself, made before its name was claimed, is
+//!   its own claimant's, as any claim is: an exact claim comes first.
+//!
+//! Kept in <state>/names.json (the names, their owners' hashes, when they were made and last played), written whole
+//! to a temporary file of 0600, synced and renamed over the old one ([`Claims::save`]).
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use parking_lot::RwLock;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+use nfsu2_util::atomic_file::Options;
+
+#[cfg(test)]
+mod tests;
+
+pub const DAY_MS: i64 = 86_400_000;
+/// a claim holds this long after its owner last played under it or used its keyphrase: as long as nfsu2-vault keeps a
+/// keyphrase nobody uses (`VaultOptions::unused_ms`, two years)
+pub const HOLD_DAYS: i64 = 730;
+/// at most one change of name in this many days (the first is free)
+pub const CHANGE_DAYS: i64 = 7;
+/// the name before a change stays its owner's this long
+pub const GRACE_DAYS: i64 = 14;
+/// the names nobody claims (lower case): the game's default profile name, and its name for nobody in particular
+pub const UNCLAIMABLE: &[&str] = &["name", "player"];
+/// claims kept at most (the dead ones go first).  500,000 until 2026-11-06, when it was reached (a claim was a 507
+/// "full" for everyone new); 5 million fit the 140 GB of keyphrase saves the server keeps (32 KB each at the least)
+pub const MAX_CLAIMS: usize = 5_000_000;
+/// the dead claims go at most this often (the server's minute timer: a claim ends days after its last use, and a
+/// prune goes through every claim with the lock taken)
+const PRUNE_EVERY_MS: i64 = 3_600_000;
+/// with MAX_CLAIMS of them, a claim of a new name looks for dead ones at most this often (each time: every claim
+/// gone through, the lock taken)
+const FULL_PRUNE_MS: i64 = 60_000;
+/// a claim's `seen` moves on at most this often (each move is a write of the file)
+const SEEN_STEP_MS: i64 = 3_600_000;
+
+/// a keyphrase, as the claims know it: 22 characters of base64url
+pub type Owner = Arc<str>;
+
+/// The Online form of a name, as runtime/online.c `clean` makes the game's: the letters, digits, - and _, any other
+/// run of characters one _ (none at either end), cut to 15; one or two characters padded with _.  None: nothing of a
+/// name in it.
+pub fn clean(name: &str) -> Option<String> {
+    let mut out = String::with_capacity(15);
+    let mut gap = false;
+    for ch in name.chars() {
+        if out.len() >= 15 {
+            break;
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '_' || ch == '-') {
+            gap = true;
+            continue;
+        }
+        if gap && !out.is_empty() && out.len() < 14 {
+            out.push('_');
+        }
+        gap = false;
+        out.push(ch);
+    }
+    if out.is_empty() {
+        return None;
+    }
+    while out.len() < 3 {
+        out.push('_');
+    }
+    Some(out)
+}
+
+/// what a name is compared by: its Online form in lower case
+pub fn canonical(name: &str) -> Option<String> {
+    clean(name).map(|s| s.to_ascii_lowercase())
+}
+
+/// the most characters of a name its second form keeps (`second`): with the "_2", 15, an Online form's most
+pub const SECOND_BASE: usize = 13;
+
+/// The second form of a name: the Online form of co-op free roam's second player's name beside a player of `name` (its
+/// page names it "<the first's Online form, cut to SECOND_BASE> 2", and `clean` makes the gap one _ while the form is
+/// under 14 characters): "Alex" -> "Alex_2", "Alex the Great" -> "Alex_the_Grea_2".  None: nothing of a name in it.
+pub fn second(name: &str) -> Option<String> {
+    let base = clean(name)?;
+    // (an Online form is ASCII: cut anywhere)
+    Some(format!("{}_2", &base[..base.len().min(SECOND_BASE)]))
+}
+
+/// The name a second form (`second`) was made of, as far as it keeps it: its first SECOND_BASE characters at most (an
+/// Online form is 3 at least).  None: `form` (an Online form, any case) is no second form.
+pub fn second_base(form: &str) -> Option<&str> {
+    form.strip_suffix("_2").filter(|b| (3..=SECOND_BASE).contains(&b.len()))
+}
+
+/// The name as typed or its Online form reads as a slur (nfsu2-names): both, since the form leaves out what is no
+/// letter or digit of the game's ("Nіgger" with a Cyrillic і reads as one typed, its form "N_gger" would not) and
+/// joins what spaces kept apart.
+pub fn reads_as_slur(typed: &str, shown: &str) -> bool {
+    nfsu2_names::blocked_name(typed) || nfsu2_names::blocked_name(shown)
+}
+
+/// the owner a keyphrase's token stands for (`Bearer` at /names, "claim" in the switch's hello): None when it is no
+/// token (43 characters of base64url, as /vault takes them)
+pub fn owner_of_token(token: &str) -> Option<Owner> {
+    let ok = token.len() == 43 && token.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+    ok.then(|| owner_of_id(&Sha256::digest(token.as_bytes()).into()))
+}
+
+/// the owner of the keyphrase kept under `id` (nfsu2-vault's id: the token's SHA-256)
+pub fn owner_of_id(id: &[u8; 32]) -> Owner {
+    let mut h = Sha256::new();
+    h.update(b"nfsu2 claim\0");
+    h.update(id);
+    Arc::from(&nfsu2_util::js::base64url(&h.finalize())[..22])
+}
+
+/// What a name is to whoever asks (its owner, or None for nobody's)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// nothing of a name in it
+    Invalid,
+    /// NAME or Player: nobody claims it
+    Default,
+    /// it reads as a slur (nfsu2-names)
+    Blocked,
+    Free,
+    /// the asker's until then: its current name, or the one before its last change (for `GRACE_DAYS`)
+    Yours {
+        until: i64,
+        current: bool,
+    },
+    /// another keyphrase's
+    Taken,
+}
+
+/// an owner's current name: as shown, until when it holds, and from when it may change (0: now)
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mine {
+    pub name: String,
+    pub until: i64,
+    pub next_change: i64,
+}
+
+/// why a claim was not made
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    Invalid,
+    Default,
+    Blocked,
+    Taken,
+    /// the owner changed its name less than `CHANGE_DAYS` ago: its next change then
+    TooSoon {
+        next: i64,
+    },
+    Full,
+}
+
+#[derive(Clone, Debug)]
+struct Claim {
+    /// as shown (its Online form, the case its owner typed)
+    name: String,
+    owner: Owner,
+    made: i64,
+    /// its owner last played under it (or claimed it)
+    seen: i64,
+    /// 0: held for `HOLD_DAYS` after `seen`; else the end of the grace of a name its owner changed from
+    until: i64,
+}
+
+impl Claim {
+    fn end(&self) -> i64 {
+        if self.until > 0 { self.until } else { self.seen + HOLD_DAYS * DAY_MS }
+    }
+    fn live(&self, now: i64) -> bool {
+        now < self.end()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct OwnerRec {
+    /// its current name (lower case)
+    current: Option<String>,
+    /// its last change (0: none yet)
+    changed: i64,
+    /// the name before its last change (lower case): its Messenger lists move from there (`previous`)
+    prev: Option<String>,
+}
+
+#[derive(Default)]
+struct Inner {
+    /// lower case -> claim (dead ones too, until `prune`)
+    names: HashMap<String, Claim>,
+    owners: HashMap<Owner, OwnerRec>,
+    /// the keys of `names` longer than SECOND_BASE (14 and 15 characters), by their first SECOND_BASE: the names a second
+    /// form of SECOND_BASE characters is made of besides the one of SECOND_BASE (`seconds`; dead ones too, as `names`)
+    long: HashMap<String, Vec<String>>,
+    /// the last prune (ms; 0: none yet)
+    pruned_at: i64,
+}
+
+impl Inner {
+    fn live(&self, key: &str, now: i64) -> Option<&Claim> {
+        self.names.get(key).filter(|c| c.live(now))
+    }
+
+    /// The live claims whose second form `key` is (an Online form in lower case: `second`), an exact claim of it aside:
+    /// the claim of its base, and of a base of SECOND_BASE characters each claim of 14 or 15 that starts with it; all of
+    /// one keyphrase's (the module's text: of claims of before that share it, the base's holder's, else the oldest
+    /// claim's)
+    fn seconds(&self, key: &str, now: i64) -> Vec<&Claim> {
+        let Some(base) = second_base(key) else { return Vec::new() };
+        let long = self.long.get(base).filter(|_| base.len() == SECOND_BASE);
+        let exact = self.live(base, now);
+        let mut of: Vec<&Claim> =
+            exact.into_iter().chain(long.into_iter().flatten().filter(|k| *k != key).filter_map(|k| self.live(k, now))).collect();
+        let first = exact.or_else(|| of.iter().copied().min_by(|a, b| (a.made, &a.name).cmp(&(b.made, &b.name))));
+        if let Some(owner) = first.map(|c| c.owner.clone()) {
+            of.retain(|c| c.owner == owner);
+        }
+        of
+    }
+
+    /// Whether another keyphrase than `owner` holds a live claim that would share a second form with a claim of `key`
+    /// (an Online form in lower case of SECOND_BASE characters or more): the name of its first SECOND_BASE, or one of 14
+    /// or 15 that starts with them (an exact claim of the second form itself aside: it is its claimant's anyway)
+    fn shares_second(&self, key: &str, owner: &str, now: i64) -> bool {
+        if key.len() < SECOND_BASE {
+            return false;
+        }
+        let base = &key[..SECOND_BASE];
+        let form = format!("{base}_2");
+        let long = self.long.get(base).into_iter().flatten().map(String::as_str);
+        std::iter::once(base).chain(long).filter(|k| *k != key && *k != form).filter_map(|k| self.live(k, now)).any(|c| *c.owner != *owner)
+    }
+
+    /// `long` with a key of `names` in it (one claimed now)
+    fn index_one(&mut self, key: &str) {
+        if key.len() > SECOND_BASE {
+            let keys = self.long.entry(key[..SECOND_BASE].to_string()).or_default();
+            if !keys.iter().any(|k| k == key) {
+                keys.push(key.to_string());
+            }
+        }
+    }
+
+    /// `long` without a key of `names` (one that went: an unclaim, a release)
+    fn unindex(&mut self, key: &str) {
+        if key.len() > SECOND_BASE
+            && let Some(keys) = self.long.get_mut(&key[..SECOND_BASE])
+        {
+            keys.retain(|k| k != key);
+            if keys.is_empty() {
+                self.long.remove(&key[..SECOND_BASE]);
+            }
+        }
+    }
+
+    /// `long` made again from `names` (after names went: a prune, the file read)
+    fn index_all(&mut self) {
+        self.long.clear();
+        let keys: Vec<String> = self.names.keys().filter(|k| k.len() > SECOND_BASE).cloned().collect();
+        for k in keys {
+            self.index_one(&k);
+        }
+    }
+
+    /// the owner's live current name (lower case)
+    fn current(&self, owner: &str, now: i64) -> Option<&String> {
+        let k = self.owners.get(owner)?.current.as_ref()?;
+        self.live(k, now).filter(|c| c.until == 0 && &*c.owner == owner).map(|_| k)
+    }
+
+    fn mine(&self, owner: &str, now: i64) -> Option<Mine> {
+        let k = self.current(owner, now)?;
+        let c = &self.names[k];
+        let changed = self.owners.get(owner).map_or(0, |r| r.changed);
+        Some(Mine { name: c.name.clone(), until: c.end(), next_change: if changed > 0 { changed + CHANGE_DAYS * DAY_MS } else { 0 } })
+    }
+
+    /// the dead claims go, and owners with nothing left: true when any did
+    fn prune(&mut self, now: i64) -> bool {
+        self.pruned_at = now;
+        let n = self.names.len();
+        self.names.retain(|_, c| c.live(now));
+        let names = &self.names;
+        self.owners.retain(|o, r| {
+            if r.current.as_ref().is_some_and(|k| !names.get(k).is_some_and(|c| c.owner == *o)) {
+                r.current = None;
+            }
+            // (a change within CHANGE_DAYS still counts against the next one)
+            r.current.is_some() || now < r.changed + CHANGE_DAYS * DAY_MS
+        });
+        let gone = self.names.len() != n;
+        if gone {
+            self.index_all();
+        }
+        gone
+    }
+}
+
+/// The claimed names: shared by the server's routes (/names), the Online host and free roam's hub, each reading
+/// under a lock of its own moment.
+pub struct Claims {
+    path: Option<PathBuf>,
+    inner: RwLock<Inner>,
+    /// one more each time a name's owner changes (a claim, a change, a release, a claim's end): readers that keep what
+    /// they found (the hub) look again
+    generation: AtomicU64,
+    dirty: AtomicBool,
+}
+
+impl Claims {
+    /// the claims of <dir>/names.json (none yet: an empty file is made at the first claim)
+    pub fn open(dir: &Path, now: i64) -> Claims {
+        let c = Claims::new(Some(dir.join("names.json")));
+        if let Ok(text) = std::fs::read_to_string(dir.join("names.json")) {
+            c.read(&text, now);
+        }
+        c
+    }
+
+    /// claims kept nowhere (tests, a server without a state folder)
+    pub fn in_memory() -> Claims {
+        Claims::new(None)
+    }
+
+    fn new(path: Option<PathBuf>) -> Claims {
+        Claims { path, inner: RwLock::new(Inner::default()), generation: AtomicU64::new(1), dirty: AtomicBool::new(false) }
+    }
+
+    fn changed(&self) {
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// see the field
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+
+    /// how many names are claimed now
+    pub fn count(&self, now: i64) -> usize {
+        self.inner.read().names.values().filter(|c| c.live(now)).count()
+    }
+
+    /// what `name` is to `owner` (None: to nobody's keyphrase)
+    pub fn status(&self, name: &str, owner: Option<&str>, now: i64) -> Status {
+        let Some(shown) = clean(name) else { return Status::Invalid };
+        let key = shown.to_ascii_lowercase();
+        if UNCLAIMABLE.contains(&key.as_str()) {
+            return Status::Default;
+        }
+        if reads_as_slur(name, &shown) {
+            return Status::Blocked;
+        }
+        let g = self.inner.read();
+        let yours = |c: &Claim| Status::Yours { until: c.end(), current: c.until == 0 };
+        match g.live(&key, now) {
+            Some(c) if owner.is_some_and(|o| *c.owner == *o) => yours(c),
+            Some(_) => Status::Taken,
+            // the second form of a claimed name: its owner's (its current name's before an old one's), nobody else's
+            None => {
+                let of = g.seconds(&key, now);
+                match owner.and_then(|o| of.iter().filter(|c| *c.owner == *o).max_by_key(|c| (c.until == 0, c.end()))) {
+                    Some(c) => yours(c),
+                    // (one whose second form another keyphrase's claim has: `claim` refuses it)
+                    None if of.is_empty() && g.shares_second(&key, owner.unwrap_or(""), now) => Status::Taken,
+                    None if of.is_empty() => Status::Free,
+                    None => Status::Taken,
+                }
+            }
+        }
+    }
+
+    /// The keyphrase `name` is claimed by now (None: nobody's), by a claim of that name itself (a second form's owner
+    /// is no holder here: `holders`).  EA Messenger's lists and the friends' messages go by it: a persona is a claimed
+    /// name, never a second player's.
+    pub fn holder(&self, name: &str, now: i64) -> Option<Owner> {
+        let key = canonical(name)?;
+        self.inner.read().live(&key, now).map(|c| c.owner.clone())
+    }
+
+    /// the keyphrases that hold `name` now: its claim's, else, for a second form (`second`), the owner of the names it is
+    /// made of (one: the module's text); none: nobody's
+    pub fn holders(&self, name: &str, now: i64) -> Vec<Owner> {
+        let Some(key) = canonical(name) else { return Vec::new() };
+        let g = self.inner.read();
+        if let Some(c) = g.live(&key, now) {
+            return vec![c.owner.clone()];
+        }
+        let mut of: Vec<Owner> = g.seconds(&key, now).iter().map(|c| c.owner.clone()).collect();
+        of.sort_unstable();
+        of.dedup();
+        of
+    }
+
+    /// whoever has `owner` may play under `name`: nobody claimed it, or that keyphrase did; or, for the second form of
+    /// claimed names (`second`), that keyphrase holds it (`holders`)
+    pub fn may_use(&self, name: &str, owner: Option<&str>, now: i64) -> bool {
+        let Some(key) = canonical(name) else { return true };
+        let g = self.inner.read();
+        if let Some(c) = g.live(&key, now) {
+            return owner.is_some_and(|o| *c.owner == *o);
+        }
+        let of = g.seconds(&key, now);
+        of.is_empty() || owner.is_some_and(|o| of.iter().any(|c| *c.owner == *o))
+    }
+
+    /// `owner`'s current name
+    pub fn mine(&self, owner: &str, now: i64) -> Option<Mine> {
+        self.inner.read().mine(owner, now)
+    }
+
+    /// the name `owner` had before its last change, while that change is younger than `GRACE_DAYS` (lower case)
+    pub fn previous(&self, owner: &str, now: i64) -> Option<String> {
+        let g = self.inner.read();
+        let r = g.owners.get(owner)?;
+        (now < r.changed + GRACE_DAYS * DAY_MS).then(|| r.prev.clone()).flatten()
+    }
+
+    /// `owner` claims `name`: its name from now on (a change when it had another)
+    pub fn claim(&self, name: &str, owner: &Owner, now: i64) -> Result<Mine, Refusal> {
+        let shown = clean(name).ok_or(Refusal::Invalid)?;
+        let key = shown.to_ascii_lowercase();
+        if UNCLAIMABLE.contains(&key.as_str()) {
+            return Err(Refusal::Default);
+        }
+        if reads_as_slur(name, &shown) {
+            return Err(Refusal::Blocked);
+        }
+        let mut g = self.inner.write();
+        match g.live(&key, now) {
+            Some(c) if c.owner != *owner => return Err(Refusal::Taken),
+            Some(c) if c.until == 0 => {
+                // its own current name again: as it is typed now, and played
+                let c = g.names.get_mut(&key).expect("live");
+                if c.name != shown || now - c.seen >= SEEN_STEP_MS {
+                    c.name = shown;
+                    c.seen = now;
+                    self.dirty.store(true, Ordering::Relaxed);
+                }
+                return Ok(g.mine(owner, now).expect("current"));
+            }
+            // the name it changed from (back to it: a change too)
+            Some(_) => {}
+            // free, or the second form of claimed names (`second`): another's if it is another keyphrase's; its own
+            // already if it is its own (no change: a claim of it would let its name go)
+            None => {
+                let of = g.seconds(&key, now);
+                if of.iter().any(|c| c.owner != *owner) {
+                    return Err(Refusal::Taken);
+                }
+                if !of.is_empty()
+                    && let Some(mine) = g.mine(owner, now)
+                {
+                    return Ok(mine);
+                }
+            }
+        }
+        // a name whose second form another keyphrase's claim has (the module's text): theirs
+        if g.shares_second(&key, owner, now) {
+            return Err(Refusal::Taken);
+        }
+        if let Some(old) = g.current(owner, now).cloned() {
+            let rec = g.owners.get(owner).cloned().unwrap_or_default();
+            if rec.changed > 0 && now < rec.changed + CHANGE_DAYS * DAY_MS {
+                return Err(Refusal::TooSoon { next: rec.changed + CHANGE_DAYS * DAY_MS });
+            }
+            let c = g.names.get_mut(&old).expect("current");
+            c.until = now + GRACE_DAYS * DAY_MS;
+            let r = g.owners.entry(owner.clone()).or_default();
+            r.prev = Some(old);
+            r.changed = now;
+        }
+        if g.names.len() >= MAX_CLAIMS && !g.names.contains_key(&key) {
+            if now >= g.pruned_at + FULL_PRUNE_MS {
+                g.prune(now);
+            }
+            if g.names.len() >= MAX_CLAIMS {
+                return Err(Refusal::Full);
+            }
+        }
+        g.names.insert(key.clone(), Claim { name: shown, owner: owner.clone(), made: now, seen: now, until: 0 });
+        g.index_one(&key);
+        g.owners.entry(owner.clone()).or_default().current = Some(key);
+        let mine = g.mine(owner, now).expect("just claimed");
+        drop(g);
+        self.changed();
+        Ok(mine)
+    }
+
+    /// `owner` played under `name` (the Online lobby, free roam): a claim of its current name holds `HOLD_DAYS` from
+    /// now
+    pub fn seen(&self, name: &str, owner: &str, now: i64) {
+        let Some(key) = canonical(name) else { return };
+        let due = self.inner.read().live(&key, now).is_some_and(|c| *c.owner == *owner && c.until == 0 && now - c.seen >= SEEN_STEP_MS);
+        if !due {
+            return;
+        }
+        if let Some(c) = self.inner.write().names.get_mut(&key).filter(|c| *c.owner == *owner && c.until == 0) {
+            c.seen = now;
+            self.dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// `owner`'s keyphrase was used (its cloud saves read or saved, /vault): the claim of its current name holds
+    /// `HOLD_DAYS` from now, as the keyphrase does
+    pub fn used(&self, owner: &str, now: i64) {
+        let name = {
+            let g = self.inner.read();
+            g.current(owner, now).map(|k| g.names[k].name.clone())
+        };
+        if let Some(name) = name {
+            self.seen(&name, owner, now);
+        }
+    }
+
+    /// a keyphrase gone from the cloud: its names are free.  How many there were.
+    pub fn release(&self, owner: &str) -> usize {
+        let mut g = self.inner.write();
+        let keys: Vec<String> = g.names.iter().filter(|(_, c)| *c.owner == *owner).map(|(k, _)| k.clone()).collect();
+        // (only these out of `long`: making it again from every claim took 165-180 ms at 500k claims, under the lock
+        // every reader waits on: the 2026-11-05 security audit)
+        for k in &keys {
+            g.names.remove(k);
+            g.unindex(k);
+        }
+        g.owners.remove(owner);
+        drop(g);
+        if !keys.is_empty() {
+            self.changed();
+        }
+        keys.len()
+    }
+
+    /// the operator frees a name (the control socket): whose it was
+    pub fn unclaim(&self, name: &str) -> Option<String> {
+        let key = canonical(name)?;
+        let mut g = self.inner.write();
+        let c = g.names.remove(&key)?;
+        g.unindex(&key);
+        if let Some(r) = g.owners.get_mut(&c.owner)
+            && r.current.as_deref() == Some(key.as_str())
+        {
+            r.current = None;
+        }
+        drop(g);
+        self.changed();
+        Some(c.name)
+    }
+
+    /// the dead claims go (the server's minute timer), at most every PRUNE_EVERY_MS: true when any did, and their
+    /// readers look again
+    pub fn prune(&self, now: i64) -> bool {
+        if now < self.inner.read().pruned_at + PRUNE_EVERY_MS {
+            return false;
+        }
+        let gone = self.inner.write().prune(now);
+        if gone {
+            self.changed();
+        }
+        gone
+    }
+
+    /// names.json's text: the claims copied with the lock taken, the text made after it (a million claims take half a
+    /// second to write out, and the switch, the hub and the lobby would wait for the lock that long)
+    pub fn serialize(&self, now: i64) -> String {
+        use std::fmt::Write as _;
+        let (mut names, mut owners) = {
+            let g = self.inner.read();
+            let names: Vec<Claim> = g.names.values().filter(|c| c.live(now)).cloned().collect();
+            let owners: Vec<(Owner, Option<String>, i64)> =
+                g.owners.iter().filter(|(_, r)| r.changed > 0).map(|(o, r)| (o.clone(), r.prev.clone(), r.changed)).collect();
+            (names, owners)
+        };
+        names.sort_by(|a, b| a.made.cmp(&b.made).then_with(|| a.name.cmp(&b.name)));
+        let mut s = String::with_capacity(100 + names.len() * 110 + owners.len() * 80);
+        s.push_str("{\"v\":1,\"note\":\"claimed names: the keyphrase hash that claimed each, when, last played\",\"claims\":[");
+        for (i, c) in names.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str("{\"name\":");
+            nfsu2_util::json::write_str(&mut s, &c.name);
+            s.push_str(",\"owner\":");
+            nfsu2_util::json::write_str(&mut s, &c.owner);
+            let _ = write!(s, ",\"made\":{},\"seen\":{}", c.made, c.seen);
+            if c.until > 0 {
+                let _ = write!(s, ",\"until\":{}", c.until);
+            }
+            s.push('}');
+        }
+        s.push_str("],\"owners\":[");
+        owners.sort_by(|a, b| a.0.cmp(&b.0));
+        for (i, (o, prev, changed)) in owners.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str("{\"owner\":");
+            nfsu2_util::json::write_str(&mut s, o);
+            let _ = write!(s, ",\"changed\":{changed}");
+            if let Some(p) = prev {
+                s.push_str(",\"prev\":");
+                nfsu2_util::json::write_str(&mut s, p);
+            }
+            s.push('}');
+        }
+        s.push_str("]}");
+        s
+    }
+
+    /// names.json read (what is not a live claim of a claimable name is left out)
+    fn read(&self, text: &str, now: i64) {
+        let Ok(j) = serde_json::from_str::<Value>(text) else { return };
+        let mut g = self.inner.write();
+        let num = |o: &serde_json::Map<String, Value>, k: &str| {
+            o.get(k).and_then(Value::as_f64).filter(|t| (0.0..1e15).contains(t)).map(|t| t as i64)
+        };
+        let owner = |o: &serde_json::Map<String, Value>| {
+            o.get("owner")
+                .and_then(Value::as_str)
+                .filter(|s| s.len() == 22 && s.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'))
+                .map(Owner::from)
+        };
+        for e in j.get("claims").and_then(Value::as_array).into_iter().flatten() {
+            let Some(o) = e.as_object() else { continue };
+            let (Some(name), Some(who), Some(made), Some(seen)) =
+                (o.get("name").and_then(Value::as_str).and_then(clean), owner(o), num(o, "made"), num(o, "seen"))
+            else {
+                continue;
+            };
+            let key = name.to_ascii_lowercase();
+            if UNCLAIMABLE.contains(&key.as_str()) || nfsu2_names::blocked_name(&name) {
+                continue;
+            }
+            let c = Claim { name, owner: who, made, seen, until: num(o, "until").unwrap_or(0) };
+            if c.live(now) {
+                g.names.insert(key, c);
+            }
+        }
+        // each owner's current name: its newest held one (two in a file edited by hand: the older goes)
+        let mut cur: HashMap<Owner, (i64, String)> = HashMap::new();
+        for (k, c) in &g.names {
+            if c.until == 0 {
+                let e = cur.entry(c.owner.clone()).or_insert((c.made, k.clone()));
+                if c.made > e.0 {
+                    *e = (c.made, k.clone());
+                }
+            }
+        }
+        g.names.retain(|k, c| c.until > 0 || cur.get(&c.owner).is_some_and(|(_, ck)| ck == k));
+        for (o, (_, k)) in cur {
+            g.owners.entry(o).or_default().current = Some(k);
+        }
+        for e in j.get("owners").and_then(Value::as_array).into_iter().flatten() {
+            let Some(o) = e.as_object() else { continue };
+            let (Some(who), Some(changed)) = (owner(o), num(o, "changed")) else { continue };
+            let r = g.owners.entry(who).or_default();
+            r.changed = changed;
+            r.prev = o.get("prev").and_then(Value::as_str).and_then(canonical);
+        }
+        g.prune(now);
+        g.index_all();
+    }
+
+    /// names.json written, when anything changed since the last time (the folder and the file made private)
+    pub fn save(&self, now: i64) -> Result<bool, String> {
+        let Some(path) = &self.path else { return Ok(false) };
+        if !self.dirty.swap(false, Ordering::Relaxed) {
+            return Ok(false);
+        }
+        let body = self.serialize(now);
+        Options::new()
+            .make_folder()
+            .write(path, body.as_bytes())
+            .map_err(|e| e.to_string())
+            .inspect_err(|_| self.dirty.store(true, Ordering::Relaxed))?;
+        Ok(true)
+    }
+}

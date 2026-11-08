@@ -1,0 +1,312 @@
+# Forum bot
+
+A Discord bot for the server's forums. It looks at each new post once its author has stopped adding to it (2 minutes),
+and it says something only when it is worth it:
+
+- **in the thread**, a fix it verified in the player's guide, the code or the git history (an error code, a missed
+  setting, a browser's limit, a bug fixed in the live version, with when it was fixed and since when it is live); or
+  a request for what the report lacks (the log, the browser and device, the controller's model), with how to get it.
+  In the poster's language, dates as Discord timestamps (each reader sees their own time zone), web addresses in
+  inline code; a reply too long for one message goes out as several, split between its parts;
+- **for the developer, nothing posted**: what a look finds for the developer is kept on the thread in
+  `state/threads.json`, which the discord-history MCP reads (Claude Code on the developer's machine): the notes for the
+  developer from each look (the newest 6: what happens, device, browser, version, key log lines, likely cause), a
+  flag when a person should look (a complete report nobody flagged, a recent release's problem, a handoff), the
+  threads a look said are the same problem (`sameAs`, the problem's first thread, and `links`), the crash or freeze
+  the thread was opened for (`crash`), what went live for it (`fix`) and when the poster said it works (`solved`).
+  The logs and pictures stay in the threads and in the archive. Reports went to a staff channel until 2026-11-05;
+  their notes are still in `threads.json` (`report.parts`).
+
+- **when a fix goes live**, in a thread whose problem one of the release's commits fixes: that a fix may have solved
+  it, what the fix changes (one plain sentence, no internals), to reload the page, and to post a new log if it still
+  happens. Only when a full look at the thread is sure; at most once a thread, at most 15 threads a release (the
+  threads the bot linked to a matched one as the same problem among them, at most 5; short,
+  low-effort looks), threads of the last 14 days, also threads staff wrote in (one the bot never looked at is matched
+  by its title and first post). The thread's record keeps what went live (`fix`).
+
+- **when a suggestion is carried out**, in a suggestion thread (a forum named `suggest…`, or a post the bot took for a
+  suggestion) that one of the release's commits does what it asks for: that it was added, since when it is live, where
+  to find it, and to reload the page; then it tags the thread Complete. Only when a full look is sure (the whole wish
+  or its main part, not something related); at most once a thread, at most 5 threads a release. A release that takes
+  a clear step toward a suggestion without doing it (more quick-chat phrases for a wish for text chat) gets one or
+  two sentences on what it adds, once a thread, and the thread stays open. Old suggestions count
+  too: at each release the bot reads the suggestion forums' threads, archived ones included (the newest 500 of each),
+  and keeps them a year. Suggestions tagged Complete or Denied, or locked, are left out.
+  At start and every 3 hours it also counts each suggestion's votes, for the developer: the reactions on its first
+  post and Discord's count of the thread's messages and people (`votes`, `messages`, `members` in `state/threads.json`;
+  the model doesn't see them).
+
+- **in #help** (a text channel named `help`): a question that one of the FAQ's answers settles gets a reply within
+  seconds that pings the asker: one line in their language, made only of what that answer says (the page's labels
+  as the page names them, as for the FAQ's buttons). The asker's lines of 8 seconds make one question; one Haiku
+  call reads them in the chat around them and names the answer and writes the line, or none when unsure. A problem
+  ("my camera keeps turning") gets only an answer marked `for: problems` in `faq.md`, never a how-to; a line with less
+  than 0.3 of its word pairs in its answer (made from their screenshot instead) is not posted, and a line starting with
+  its answer's bold label ("Music:") loses it. Nothing for staff, chat, answers
+  to others, or someone already answered; the same answer to a person once a day (a follow-up within 20 minutes may
+  get another part of it, never a line they had), 5 a person a day, 60 an hour. Besides the FAQ's buttons it answers
+  from `faq.md`'s "Only in #help" section, which has no buttons. A line with a link or a web address that its answer
+  doesn't have word for word, a mention, a code block or "From the developer", in English or after the translation, is
+  not posted (the log says why): players' messages could ask the model for their own link.
+  Everything else in #help is as in the general channels below (it is one of them), without their fixed answers.
+
+- **in the general channels** (text channels named `general…`, and #help), sparingly: someone who reports a problem of their own
+  there, and whom nobody helps within 4 minutes, gets one short reply in their language. When the problem is
+  unmistakably one the page names by a code (`PAGE-NOT-ISOLATED`, `GPU-ADAPTER-ANDROID`, ... in their words or their
+  screenshot), or one the guide answers in a line (a name that got four digits, a TV's or a console's browser,
+  Windows 7 or 8, an iPhone without sound, the network-or-VPN ban box; `FIXES` in `general.mjs`), the reply is its one-line fix from the guide; otherwise it points to the forum
+  thread about it or to the bug-reports forum, with what to post there (the log, a screenshot of the message, or how
+  the saves went). Nothing for questions, chat, opinions or answers to others, nothing when staff or another member
+  already pointed them to the forum or a member's answer fits (a reply to them starts the wait over; a pointer to the
+  whole channel answers everyone who wrote of the same kind of problem there in the 10 minutes before); at most once a
+  person a week and 6 an hour a channel; nothing for someone talking it over with members (a second member helping
+  them, or them answering a member: for 30 minutes), nothing 20 minutes after their first message, and no pointer
+  to their own thread. A local word filter picks the candidates (about 10% of the messages), and
+  one Haiku call sorts them in the chat around them (what they reply to, who answered, their pictures): about 70 calls
+  and 3 cents a day. `general-eval.mjs` replays an export of the channels through it (below).
+
+- **Translate**, in any message's Apps menu (right-click, or a long press on a phone): the message and its
+  translation in one box, a divider between them and nothing else, seen only by the one who asked. A message not in
+  English is translated into English; one in English into the thread's language (in a plain channel, the language the
+  others there write in), or into the reader's own Discord language when the thread is English too. One short Haiku
+  call, and every translation is kept 30 days in `state/translations.json`: a message costs one call however many
+  people translate it, and a thread's language is kept too, so later translations in it send no other messages
+  along. At most 30 new translations a person an hour.
+
+- **The FAQ**, for a read-only channel: `/faq` (only for those who can manage the server) posts one message there,
+  the questions players ask most as buttons under their topics; a button's answer is seen only by the one who
+  pressed it. The questions and answers are `faq.md` (the file says how to write it); the bot reads it from its clone,
+  so a pushed change shows in the posted message within minutes, and `/faq` again in that channel brings it up to
+  date at once. A version Discord would refuse (a label over 80 characters, more than 40 parts) keeps the one before
+  it, and the log says why. An answer goes to each reader in their Discord language: one short Haiku call the first
+  time someone of that language presses it, given the page's own words for the buttons and settings it names
+  (`web/src/app/lang`), then kept in `state/faq-translations.json` until the answer changes. English readers get
+  `faq.md` as it is.
+
+- **Forum tags**: each look adds the forum's tags that say what the thread is about, at most two (the problem, and the
+  device when it is a phone or tablet), picked from the forum's tags but the five below (Dev aware is staff's own), the moderated ones and
+  Denied. Four it keeps itself, by name, in a forum that has them: **Needs info** while its last reply asked the poster
+  for something, **Fix live** once it told the thread that a fix went
+  live, **Complete** once it told a suggestion that it was added, and **Solved** when the poster says the problem is
+  gone (a message of theirs that passes a word filter, then one short Haiku call over the end of the thread; also in
+  threads staff answered; the thread's record in `threads.json` keeps when, also in a dry run). It takes off only its own Needs info and Fix live: the poster's and staff's tags stay. It needs Manage Threads in the forums (Set up, step
+  3); nothing in a dry run (the log says what it would set).
+
+Otherwise it says nothing. It reads every channel it can see, but posts only in forum threads, those replies in the
+general channels and #help, and the FAQ it was asked to post. It
+stays out of a thread once staff wrote in it (the server owner, `BOT_STAFF`, anyone who can manage threads), and replies
+at most twice in a thread on its own. Someone answering it gets a look past that, up to `BOT_MAX_TALK` replies (4;
+someone still writing to it after those gets the thread flagged once, with what they wrote, for the archive's reader):
+after it asked for something, the poster's next post, which always gets a reply (a fix, or what their log shows and
+that the developer has it), so nobody who did what it asked hears nothing; and the poster writing right after its
+message, with Discord's reply or without ("that didn't work", "where is that setting?"). A bare thanks or okay gets no
+look, and the poster still writing while a look waits makes it wait for them. A look
+that repeats a tool call word for word gets told so, and the second time it has to answer; so does a look whose last
+three calls brought nothing (an error, no matches, a line or two of a file), and a look that makes a call to fill a
+turn (`messages /x/`, `read x`, `read attachments/`, a pattern meant to match nothing) answers at once, the call not run. Staff can mention
+the bot in a thread to have it look anyway. A bump, the poster writing again after the thread was quiet for 12 hours
+("any ideas?"), gets a look and a reply too (a fix, a question, or where it stands), also in a thread staff wrote in
+before, unless staff answer it first; bumps while the bot was away get theirs at start. A log (a `.log` or `.txt`
+file) posted in a thread by anyone but staff always gets a look, also past the two replies and where staff wrote. Anyone
+who replies to the bot's message (with the ping or without) or mentions it gets a look too, and an answer when there is
+something to say, until the bot has replied `BOT_MAX_TALK` times (4) in the thread. The same log file posted again
+(same name and size) gets no look, and a reply that mostly says again what the bot said in the thread (half its word
+pairs) is dropped, and so is a third ask. Someone answering the bot first gets a quick Haiku pass (`replyPass()`, no
+tools): "thanks, it works now" ends there, anything that may need an answer gets the full look. The look is told the
+thread the bot linked it to before, how often the bot replied and asked in it, and the poster's other threads of the
+week with the bot's last reply in each, so one problem gets one answer. When the poster disputes the bot, is upset
+with it, or the talk goes in circles, the look steps back (`handoff` in its verdict): nothing posted, the thread flagged, and no more looks in it unless
+staff mention the bot (a fix notice still goes out). Nothing is sent to the developer, so the bot never says it passed
+a report on. A reply in a script nobody in the thread writes (Cyrillic to an English post) is dropped.
+
+Every model call goes on a meter (`spend.mjs`, `state/spend.json`): looks, sorting, tags, translations, release checks,
+against `BOT_BUDGET` dollars a month (400, UTC months). Only the looks wait for money: each day they may spend what is
+left of the month over the days left in it, so a quiet day leaves more for the rest and a busy week can't spend the
+month. And the day's share comes as the UTC day goes: by any hour the looks may have spent that part of it, plus 6
+hours ahead (a quarter at midnight, all of it by 18:00), so the bot answers all day instead of until the morning. A new
+post past that gets a quick pass instead of a look (`firstPass()` with `budget`: Haiku, no tools, a fraction of a cent),
+which posts only an ask for what is missing or an answer at high confidence, and flags and links nothing (on
+2026-11-06 about 40 bug threads posted after 12:30 UTC never heard from the bot). Nothing runs later (there was a
+catch-up at midnight until 2026-11-05). Someone
+talking to the bot (a follow-up, a log, a reply to it, a bump) goes ahead of the clock, up to twice the day's share,
+and what it spends over the share comes out of the days after: on 2026-11-05, 41 of them went unanswered. Staff's
+mentions and a release's notices (fix live, suggestion added) still get theirs at once, but no fix notice where staff
+wrote since the release. The bot's first log line says what the month and the day spent so far.
+
+## How it works
+
+- `bot.mjs`: Discord (discord.js). It decides when to look, builds the thread's text, saves attachments, inlines
+  pictures (PNG, JPEG, GIF, WebP up to 10 MB, the newest 4 of a thread) and posts. Each picture goes to the model at most 1,568
+  visual tokens big (`picture()` in `investigate.mjs`, with sharp), the size Claude read pictures at before Opus 4.7:
+  a phone screenshot costs 1,456 tokens instead of 3,354, a 4K one 1,560 instead of 4,784.
+- `investigate.mjs`: one look. It sends Claude the rules (`system.md`), the maintainer's notes (`knowledge.md`),
+  `docs/web/PLAYING.md` as of the live version, the live version, recent commits, recent threads and the problems
+  flagged for the developer (each one's first thread, the threads linked to it, a fix that went live; what it points
+  posters to and links duplicates to), and the thread with the files it can read named at its top. `sigs.mjs`
+  reads the top three functions of each log's crash (`TRAP`) or freeze (watchdog) stack, and `logs.mjs` writes each of
+  the thread's newest 4 page logs' gist under it in the thread (each game's version, browser, device, the settings
+  changed, how it ended, the lines that say something went wrong with their line numbers and counts, its last lines),
+  so a look starts from what it searched every log for (on 2026-11-05, looks that ran their 8 turns, nearly all of
+  them reading logs, were 15% of the looks and 43% of the money); the look is told the open
+  threads opened for a crash or freeze in the same place (two functions in common; the oldest first), so threads link
+  by the bug, not by the exit code. A thread keeps the crash it was opened for (the verdict's `crash`, `st.crash`, the
+  first one a look names): its later logs, or another game's crash in its log, never make it match other bugs.
+  The rules, the notes, the guide and the code's history up to the live version (the same for every look until the
+  next release, or a change to the rules or the notes) are kept an hour in the prompt cache, so a look reads them for
+  a tenth of the price instead of sending them again; the newest commits, which change more often, go with the
+  thread. Claude reads what it needs through the tools, several calls a turn, at most 8 turns, then returns a verdict
+  as JSON: none, ask or answer, and whether to tell the developer. `vet()` drops weak answers and replies that paste code.
+  A reply that links the thread itself, a newer thread or a closed one goes back to the model once, in one more turn
+  without tools, to be written without it (`badLink()`; the thread lists mark closed threads). A new post in a suggestion forum first
+  gets a quick pass with Haiku and no tools (`firstPass()`): when it finds nothing for the bot to say, its summary,
+  category and tags stand and there is no full look; anything else gets the full look, which writes the reply.
+- `tools.mjs`: what Claude can do. It can search and read the code, read the thread's attachments, look at the git
+  history (`LIVE` is the live server's commit), search the forums' threads (to point a duplicate to the earlier one)
+  and the archive of recent messages (the staff channel's marked private: the model may use them, never repeat them),
+  and get the page's common labels in a language (`labels`), for replies that name the page's buttons.
+  Everything is read only: no shell, no network, no writing, and nothing outside
+  the bot's own copy of the code and the attachments.
+- `repo.mjs`: the bot's own clone of the code in `state/repo`, fetched at most every 5 minutes. The rules, the notes
+  and the guide are read from that clone, so a pushed change to them applies within minutes, without a new image or a
+  restart. The live version comes from the module file, else `https://nfsu2.xyz/game.json`; next to the module file,
+  `release.sh`'s `release.json` names the running image's commit, which is the live version while it names that module
+  (a release of only the page or the server keeps the module's `nfsu2.json`). Each new live version goes into
+  `state/releases.json` with its time (the file's, which `release.sh` writes as the release goes out), and every
+  commit the model reads shows when it went live.
+- `archive.mjs`: every message of every channel the bot sees, kept 30 days in `state/archive/` (the model searches the
+  last 7), with their text files (gzipped) and pictures (WebP, at the size the API shrinks them to) in
+  `state/archive/files/`, at most 3 GB: past that the oldest days' files go first. Videos and zips: names only. At start the bot reads the forums' threads with posts in the last 48 hours, nothing older: it lists them
+  (titles and first posts) in `state/threads.json`, and looks at the ones opened in that time that it never looked
+  at, so a restart misses no post.
+- `general.mjs`: the general channels: the replies that point to the forums or give a page code's fix.
+- `help.mjs`: the FAQ's answers in #help.
+- `translate.mjs`: the Translate command. The bot registers it at start; the `bot` scope of the invite covers it.
+- `faq.mjs`: the FAQ message, its answers and their translations; `faq.md` holds the questions and answers.
+- `tags.mjs`: the forum tags. A look's verdict names the tags it picked from "Tags you may add" in the thread's text.
+- `eval.mjs`: the bot against past threads (below).
+
+`docker compose logs -f` shows each step as it happens: when a post is seen and when its look is due, what the look
+reads (each search and file, and how much it found), the verdict, what was posted, and what went to the staff. Each
+look also adds one line to `state/verdicts.jsonl`: the verdict with the developer notes, what was posted (or why not),
+the tools used, the tokens and the cost.
+
+## Set up
+
+1. **Discord application.** In https://discord.com/developers/applications, create an application. Under Bot:
+   - reset the token and copy it;
+   - turn on **Message Content Intent** (no other intent is needed);
+   - turn off Public Bot, so only you can invite it.
+
+   Invite it with
+   `https://discord.com/oauth2/authorize?client_id=<application id>&scope=bot&permissions=274877973504`.
+   That gives it View Channels, Read Message History and Send Messages in Threads, and nothing else. Without Send
+   Messages it cannot write in ordinary channels or open posts. If a forum hides itself from @everyone, give the bot
+   View Channel there too. For the replies in the general channels and #help, allow it Send Messages in those
+   channels' permissions.
+2. **A private staff channel**, if the server has one the bot can read: its id as `BOT_STAFF_CHANNEL` (Developer Mode
+   in User Settings, Advanced; right-click the channel, Copy Channel ID). The bot posts nothing there: it never looks
+   at threads in it, and its messages are archived marked private (a look may learn from them, never quote them).
+3. **Forum tags.** In each forum's permissions, add the bot with Manage Threads: only the poster and those who can
+   manage threads can set a post's tags. Without it the bot says so once in the log and goes on without tags. It
+   picks from the tags each forum has, so a new tag needs nothing else; name its own four exactly Needs info, Fix
+   live, Complete and Solved (any letter case). Tags players should not set themselves (Needs info, Dev
+   aware, Fix live, Complete, Denied): "Only allow moderators to apply this tag" in the forum's tag settings. The bot
+   never picks a moderated tag, its own five aside.
+4. **FAQ channel.** In the read-only channel's permissions, add the bot with View Channel and Send Messages, then
+   type `/faq` there.
+5. **Claude.** Create an API key at https://console.anthropic.com, and set a monthly spend limit there.
+6. **`.env`**:
+
+   ```sh
+   DISCORD_TOKEN=...
+   ANTHROPIC_API_KEY=...
+   # BOT_STAFF_CHANNEL=...       # a private staff channel: never watched, archived as private
+   BOT_DRY_RUN=1                 # first: replies only to the log, not the forums
+   # BOT_FORUMS=123,456          # only these forum channels (default: every forum)
+   # BOT_STAFF=789               # more staff: user or role ids
+   ```
+
+## In Docker
+
+`.github/workflows/image-bot.yml` builds `ghcr.io/th0mk/nfsu2-web-bot` on every push that changes this folder. On the
+server, in a folder of its own (`/srv/nfsu2-bot`, say), put `compose.yml` from here and the `.env` above, then:
+
+```sh
+docker compose pull && docker compose up -d
+docker compose logs -f
+```
+
+The bot clones the public repository into its `state` volume, and reads the live version from the game server's module
+folder (`/srv/nfsu2/module`, read only): Cloudflare answers the server's own requests for game.json with a check page. If the pull is denied, the image is private on GitHub:
+make it public in the package's settings, or log in once with `docker login ghcr.io -u th0mk` and a token with
+`read:packages`.
+
+- New code: `docker compose pull && docker compose up -d`. A change to `system.md`, `knowledge.md` or the guide needs
+  nothing: the bot reads them from its clone.
+- After a change to `.env`: `docker compose up -d`.
+- One post without Discord: `docker compose run --rm bot node try.mjs --title "Game crashes" "it crashes in free roam"`.
+  With a log: add `-v "$PWD/x.log:/tmp/x.log:ro"` after `--rm` and `/tmp/x.log` at the end.
+
+## Without Docker
+
+Node 22.9 or newer and git, in this folder:
+
+```sh
+npm ci && npm start
+node --env-file=.env try.mjs --title "Game crashes" "it crashes in free roam on my iphone" nfsu2-2026-10-25_151223.log
+```
+
+It clones the checkout this folder is in (its `main` branch, so committed changes only), unless `BOT_REPO` says
+otherwise.
+
+## Trying it on past threads
+
+`eval.mjs` runs past threads through the bot, each as a new post, and writes a report next to the cases with the bot's
+reply, its staff note, and what staff or members actually answered:
+
+```sh
+node --env-file=.env eval.mjs cases.json --staff --limit 20     # 20 threads that staff answered
+node --env-file=.env eval.mjs cases.json --only bug-reports/015,suggestions/008
+```
+
+`cases.json` is made from a Discord export and stays out of this repository: it holds players' posts and logs. It
+stops at `--budget` dollars (default 5); a look costs a few cents.
+
+`general-eval.mjs` does the same for the general channels: an export of them (a JSON list of messages, `{ id, ch, t,
+a, c, re: { a, c }, att, bot }`) replayed in order on its own clock, with the real sorting, and a report next to it of
+every reply the bot would post and how it sorted every author. A day costs about 3 cents; the export has no pictures,
+so the sorting reads none.
+
+```sh
+node --env-file=.env general-eval.mjs nfsu2-general-last24h.json --staff name,name
+node --env-file=.env general-eval.mjs export.json --from 2026-10-26T12:00 --to 2026-10-26T18:00
+```
+
+## Rolling it out
+
+Run it with `BOT_DRY_RUN=1` for a day. Every reply it would have posted goes to the log instead (`docker compose logs`),
+and `state/verdicts.jsonl` has every look. When the replies look right, remove the line and run `docker compose up -d`.
+
+## Settings
+
+| Variable | Default | |
+|---|---|---|
+| `BOT_STAFF_CHANNEL` | | a private staff channel's id: never watched, its messages archived marked private |
+| `BOT_DRY_RUN` | off | `1`: post nothing in the forums or the general channels, and set no tags; the replies go to the log |
+| `BOT_FORUMS` | every forum | forum channel ids to answer in |
+| `BOT_STAFF` | | user or role ids of staff, besides the owner and anyone who can manage threads |
+| `BOT_MODEL` | `claude-sonnet-5-5` | |
+| `BOT_EFFORT` | `medium` | `low` … `max`: how much the model thinks and reads before it answers |
+| `BOT_MIN_CONFIDENCE` | `medium` | answers below this confidence are not posted (questions are) |
+| `BOT_WAIT_S` | `120` | quiet time after the poster's last message before the look (at most 10 minutes after the first) |
+| `BOT_MAX_REPLIES` | `2` | replies per thread on the bot's own (logs, bumps and staff's mentions get a look past it) |
+| `BOT_MAX_TALK` | `4` | replies per thread in all, answering people who reply to the bot or mention it |
+| `BOT_BUDGET` | `400` | dollars a month for every model call; new posts past the day's share by the hour get a quick pass only |
+| `BOT_ARCHIVE` | on | `0`: don't keep messages (the model then can't search other channels) |
+| `BOT_STATE` | `state` (`/state` in Docker) | where the clone, the archive, the thread list, the verdicts and the translations go |
+| `BOT_REPO`, `BOT_BRANCH` | this checkout, `main` | where the code comes from (in `compose.yml`: GitHub over SSH) |
+| `BOT_LIVE_FILE` | `/live/nfsu2.json` | the live module's `nfsu2.json`, for its version (`rev`), and `release.json` beside it (the image's commit); `compose.yml` mounts `/srv/nfsu2/module` there |
+| `BOT_LIVE_URL` | `https://nfsu2.xyz/game.json` | the live version when there is no such file (Cloudflare may refuse it to a server) |
+
+Server-side fallback (`fallbacks: "default"`) is on: when Claude declines a request, the API runs it on another model
+instead of returning nothing.

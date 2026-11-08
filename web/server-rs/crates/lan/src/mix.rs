@@ -1,0 +1,328 @@
+//! What the pages were sent, by kind: the [players] count of where the bytes go.  Each entry of a compact bundle
+//! (compact.rs) counts its bytes as it went, under its datagram's kind: free roam's by their type (runtime/roam_core.h
+//! RC_MSG_*), LAN play's UDP (the game's own races, Online's and free roam's lobby races) and the rest; each message
+//! of a host (the free-roam hub's lists and map, the Online server's segments: `send_to`, a WebSocket message each,
+//! never in a bundle) counts as its whole frame.  On nfsu2.xyz (2026-10-30, 5,800 players) the entries other than car
+//! states carried more bytes than the car states, 104 bytes each on average: this says which they were.
+//!
+//! The same kinds count what the pages send (`of_page`): each entry of a page's bundle under its datagram's kind (those
+//! to the hub as the hub's), the destinations an entry lists past the first, the bundles' and entries' headers and the
+//! control messages (JSON) as kinds of their own.  After the 2026-10-31 release the server took in 865 Mbit/s, and
+//! nothing counted what (`MSGS`: and how many messages each way, which cloudflared pays for one by one).
+
+use crate::compact::ROAM_OK;
+use crate::{BROADCAST, KIND_UDP};
+
+/// runtime/roam_core.h RC_MSG_*: a free-roam datagram's type (0: one this does not know)
+const ROAM_TYPES: [&str; 21] = [
+    "?",
+    "hello",
+    "peers",
+    "car state",
+    "car look",
+    "car look ask",
+    "ping",
+    "pong",
+    "bye",
+    "duel",
+    "map ask",
+    "map",
+    "lobby",
+    "lobbies",
+    "race report",
+    "say",
+    "race results",
+    "map delta",
+    "near ask",
+    "near",
+    "crash damage",
+];
+const R: usize = ROAM_TYPES.len();
+/// a free-roam datagram whose magic, length or CRC did not check out (or another kind 1 on free roam's ports)
+const ROAM_BAD: usize = R;
+const UDP_OTHER: usize = R + 1;
+/// LAN play's UDP (KIND_LAN_UDP), to the page's own address, to all
+const LAN_UDP: usize = R + 2;
+const LAN_BCAST: usize = R + 3;
+const OTHER_KIND: usize = R + 4;
+/// the hub's messages, by free roam's types (R of them)
+const HUB: usize = R + 5;
+const ONLINE: usize = HUB + R;
+const OTHER_HOST: usize = ONLINE + 1;
+/// from the pages: the destinations a bundle entry lists (4 bytes each; one alone is in its frame), the bundles' and
+/// their entries' headers, the control messages (JSON), LAN play's TCP segments (the Online server's and a LAN race
+/// host's streams)
+pub(crate) const ADDRS: usize = OTHER_HOST + 1;
+pub(crate) const FRAMING: usize = OTHER_HOST + 2;
+pub(crate) const TEXT: usize = OTHER_HOST + 3;
+const LAN_TCP: usize = OTHER_HOST + 4;
+/// the kinds
+pub const KINDS: usize = LAN_TCP + 1;
+/// runtime/web/net_proto.h: LAN play's UDP and TCP
+const KIND_LAN_UDP: u8 = 3;
+const KIND_LAN_TCP: u8 = 4;
+/// runtime/roam_core.h RC_DEFAULT_PORT
+const ROAM_PORT: u16 = 47210;
+
+/// a kind's name in the count
+pub fn name(i: usize) -> String {
+    match i {
+        i if i < R => ROAM_TYPES[i].to_string(),
+        ROAM_BAD => "free roam's port, unchecked".into(),
+        UDP_OTHER => "UDP, other ports".into(),
+        LAN_UDP => "LAN UDP".into(),
+        LAN_BCAST => "LAN UDP broadcast".into(),
+        OTHER_KIND => "other frames".into(),
+        i if i < ONLINE => format!("hub {}", ROAM_TYPES[i - HUB]),
+        ONLINE => "Online server".into(),
+        OTHER_HOST => "other host".into(),
+        ADDRS => "destinations".into(),
+        FRAMING => "bundle headers".into(),
+        TEXT => "control messages".into(),
+        _ => "LAN TCP".into(),
+    }
+}
+
+/// a free-roam datagram's type at [16 + 5] of its frame, as a kind (0 for one past those known)
+fn roam_type(data: &[u8]) -> usize {
+    let t = data[16 + 5] as usize;
+    if t < R { t } else { 0 }
+}
+
+/// nfsu2-roam's ROAM_HUB_VIP: the free-roam hub's address, whose lists, map and lobbies go in bundles too
+const HUB_VIP: u32 = crate::BASE | 0xFD;
+
+/// the kind of a datagram (the switch's copy: byte 1 says whether free roam's checked out) that went from `src` to
+/// `dst` in a compact bundle (the hub's by their type, as its messages of their own were: `of_host`)
+pub(crate) fn of_entry(data: &[u8], src: u32, dst: u32) -> usize {
+    if data.len() < 16 {
+        return OTHER_KIND;
+    }
+    match data[0] {
+        KIND_UDP if src == HUB_VIP && data[1] == ROAM_OK && data.len() > 16 + 5 => HUB + roam_type(data),
+        KIND_UDP if data[1] == ROAM_OK && data.len() > 16 + 5 => roam_type(data),
+        KIND_UDP if u16::from_be_bytes([data[14], data[15]]) == ROAM_PORT => ROAM_BAD,
+        KIND_UDP => UDP_OTHER,
+        KIND_LAN_UDP if dst == BROADCAST => LAN_BCAST,
+        KIND_LAN_UDP => LAN_UDP,
+        _ => OTHER_KIND,
+    }
+}
+
+/// the kind of a frame a page sent to `dst`: free roam's by their type (those to the hub as the hub's)
+pub(crate) fn of_page(data: &[u8], dst: u32) -> usize {
+    if data.len() < 16 {
+        return OTHER_KIND;
+    }
+    let roam = data.len() > 16 + 5 && &data[16..20] == b"N2FR";
+    match data[0] {
+        KIND_UDP if roam && dst == HUB_VIP => HUB + roam_type(data),
+        KIND_UDP if roam => roam_type(data),
+        KIND_UDP if u16::from_be_bytes([data[14], data[15]]) == ROAM_PORT => ROAM_BAD,
+        KIND_UDP => UDP_OTHER,
+        KIND_LAN_UDP if dst == BROADCAST => LAN_BCAST,
+        KIND_LAN_UDP => LAN_UDP,
+        KIND_LAN_TCP => LAN_TCP,
+        _ => OTHER_KIND,
+    }
+}
+
+/// WebSocket messages each way by type (`Stats::msg`), and the writes the server made (each batch a page's writer
+/// took): every one is work for the kernel and for cloudflared, whatever its size
+pub(crate) const IN_BUNDLE: usize = 0;
+pub(crate) const IN_FRAME: usize = 1;
+pub(crate) const IN_TEXT: usize = 2;
+pub(crate) const IN_PONG: usize = 3;
+pub(crate) const IN_PING: usize = 4;
+pub(crate) const OUT_BUNDLE: usize = 5;
+pub(crate) const OUT_FRAME: usize = 6;
+pub(crate) const OUT_TEXT: usize = 7;
+pub(crate) const OUT_HOST: usize = 8;
+pub(crate) const OUT_PING: usize = 9;
+pub(crate) const OUT_PONG: usize = 10;
+pub(crate) const OUT_WRITES: usize = 11;
+pub const MSGS: usize = 12;
+
+/// The count's line of messages by kind of player (`LanSwitch::messages_by_kind`): for each kind with players, how many,
+/// their messages each way a second, and each one's
+pub fn kinds_line(kinds: &[crate::KindMsgs], secs: f64) -> Option<String> {
+    let parts: Vec<String> = kinds
+        .iter()
+        .filter(|k| k.players > 0 && secs > 0.0)
+        .map(|k| {
+            let (i, o, n) = (k.msgs_in as f64 / secs, k.msgs_out as f64 / secs, k.players as f64);
+            format!("{} {}: {i:.0} in, {o:.0} out a second ({:.1} and {:.1} each)", k.kind, k.players, i / n, o / n)
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The count's line of messages: each way a second, by type, and the writes
+pub fn msg_line(now: &[u64], was: &[u64], secs: f64) -> Option<String> {
+    let d = |i: usize| now[i].saturating_sub(was.get(i).copied().unwrap_or(0)) as f64 / secs.max(1.0);
+    let (inn, out) = ((IN_BUNDLE..=IN_PING).map(d).sum::<f64>(), (OUT_BUNDLE..=OUT_PONG).map(d).sum::<f64>());
+    if inn + out == 0.0 {
+        return None;
+    }
+    Some(format!(
+        "in {inn:.0}/s (bundles {:.0}, frames {:.0}, control {:.0}, pongs {:.0}, pings {:.0}), out {out:.0}/s (bundles {:.0}, \
+         frames {:.0}, control {:.0}, hosts {:.0}, pings {:.0}, pongs {:.0}) in {:.0} writes/s",
+        d(IN_BUNDLE),
+        d(IN_FRAME),
+        d(IN_TEXT),
+        d(IN_PONG),
+        d(IN_PING),
+        d(OUT_BUNDLE),
+        d(OUT_FRAME),
+        d(OUT_TEXT),
+        d(OUT_HOST),
+        d(OUT_PING),
+        d(OUT_PONG),
+        d(OUT_WRITES)
+    ))
+}
+
+/// the kind of a host's message (its source at [4..8])
+pub(crate) fn of_host(data: &[u8], roam: Option<u32>, online: Option<u32>) -> usize {
+    let src = (data.len() >= 8).then(|| u32::from_be_bytes([data[4], data[5], data[6], data[7]]));
+    if src.is_some() && src == roam {
+        if data.len() > 16 + 5 && data[0] == KIND_UDP && &data[16..20] == b"N2FR" { HUB + roam_type(data) } else { HUB }
+    } else if src.is_some() && src == online {
+        ONLINE
+    } else {
+        OTHER_HOST
+    }
+}
+
+/// The count's line: the kinds by their bytes since `was`, the largest first, those of at least 0.5 % of all (and
+/// how many fell under that).  `now` and `was`: bytes of each kind, then entries of each.
+pub fn line(now: &[u64], was: &[u64], secs: f64) -> Option<String> {
+    let d = |i: usize| now[i].saturating_sub(was.get(i).copied().unwrap_or(0));
+    let total: u64 = (0..KINDS).map(d).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut ks: Vec<usize> = (0..KINDS).filter(|&i| d(i) > 0).collect();
+    ks.sort_by_key(|&i| std::cmp::Reverse(d(i)));
+    let secs = secs.max(1.0);
+    let shown: Vec<String> = ks
+        .iter()
+        .filter(|&&i| d(i) * 200 >= total)
+        .map(|&i| {
+            let (b, n) = (d(i), d(KINDS + i).max(1));
+            format!(
+                "{} {:.0} % ({:.1} Mbit/s, {:.0}/s, {:.1} B each)",
+                name(i),
+                b as f64 * 100.0 / total as f64,
+                b as f64 * 8.0 / secs / 1e6,
+                n as f64 / secs,
+                b as f64 / n as f64
+            )
+        })
+        .collect();
+    let rest = ks.len() - shown.len();
+    Some(format!(
+        "{:.1} Mbit/s: {}{}",
+        total as f64 * 8.0 / secs / 1e6,
+        shown.join(", "),
+        if rest > 0 { format!(", {rest} smaller kinds") } else { String::new() }
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::BASE;
+
+    #[test]
+    fn kinds_line_says_each_kind_with_players_a_second_and_each_ones() {
+        let k = |kind, players, msgs_in, msgs_out| crate::KindMsgs { kind, players, msgs_in, msgs_out };
+        let kinds = [
+            k("racing or in a race lobby", 10, 30_000, 45_000),
+            k("in Online mode", 0, 0, 0),
+            k("driving in free roam", 4, 24_000, 24_600),
+        ];
+        assert_eq!(
+            kinds_line(&kinds, 300.0).unwrap(),
+            "racing or in a race lobby 10: 100 in, 150 out a second (10.0 and 15.0 each); driving in free roam 4: 80 in, 82 out a second (20.0 and 20.5 each)"
+        );
+        assert_eq!(kinds_line(&[k("in Online mode", 0, 5, 5)], 300.0), None);
+    }
+
+    fn frame(kind: u8, b1: u8, src: u32, dport: u16, data: &[u8]) -> Vec<u8> {
+        let mut f = vec![kind, b1, 0, 0];
+        f.extend_from_slice(&src.to_be_bytes());
+        f.extend_from_slice(&(BASE | 9).to_be_bytes());
+        f.extend_from_slice(&ROAM_PORT.to_be_bytes());
+        f.extend_from_slice(&dport.to_be_bytes());
+        f.extend_from_slice(data);
+        f
+    }
+
+    // every kind has a name, the entries and the hosts' messages land where they are
+    #[test]
+    fn kinds() {
+        let mut roam = b"N2FR\x01\x06".to_vec();
+        roam.resize(24, 0);
+        assert_eq!(name(of_entry(&frame(1, ROAM_OK, BASE | 2, ROAM_PORT, &roam), BASE | 2, BASE | 9)), "ping");
+        let mut dents = roam.clone();
+        dents[5] = 20;
+        assert_eq!(name(of_entry(&frame(1, ROAM_OK, BASE | 2, ROAM_PORT, &dents), BASE | 2, BASE | 9)), "crash damage");
+        dents[5] = 18;
+        assert_eq!(name(of_page(&frame(1, 0, BASE | 2, ROAM_PORT, &dents), HUB_VIP)), "hub near ask");
+        assert_eq!(name(of_entry(&frame(1, 0, BASE | 2, ROAM_PORT, &roam), BASE | 2, BASE | 9)), "free roam's port, unchecked");
+        assert_eq!(name(of_entry(&frame(1, 0, BASE | 2, 3659, &roam), BASE | 2, BASE | 9)), "UDP, other ports");
+        assert_eq!(name(of_entry(&frame(3, 0, BASE | 2, 9999, &roam), BASE | 2, BASE | 9)), "LAN UDP");
+        assert_eq!(name(of_entry(&frame(3, 0, BASE | 2, 9999, &roam), BASE | 2, BROADCAST)), "LAN UDP broadcast");
+        assert_eq!(name(of_entry(&[3, 0, 0], BASE | 2, BASE | 9)), "other frames");
+        let mut peers = roam.clone();
+        peers[5] = 2;
+        let (hub, online) = (Some(BASE | 0xFD), Some(BASE | 1));
+        assert_eq!(name(of_host(&frame(1, 0, BASE | 0xFD, ROAM_PORT, &peers), hub, online)), "hub peers");
+        // the hub's list in a bundle: the same kind
+        assert_eq!(name(of_entry(&frame(1, ROAM_OK, BASE | 0xFD, ROAM_PORT, &peers), BASE | 0xFD, BASE | 9)), "hub peers");
+        assert_eq!(name(of_entry(&frame(1, ROAM_OK, BASE | 2, ROAM_PORT, &peers), BASE | 2, BASE | 9)), "peers");
+        peers[5] = 200;
+        assert_eq!(name(of_host(&frame(1, 0, BASE | 0xFD, ROAM_PORT, &peers), hub, online)), "hub ?");
+        assert_eq!(name(of_host(&frame(4, 0, BASE | 1, 0, &[1; 30]), hub, online)), "Online server");
+        assert_eq!(name(of_host(&frame(4, 0, BASE | 7, 0, &[1; 30]), hub, online)), "other host");
+        // what pages send
+        assert_eq!(name(of_page(&frame(1, 0, BASE | 2, ROAM_PORT, &roam), BASE | 9)), "ping");
+        assert_eq!(name(of_page(&frame(1, 0, BASE | 2, ROAM_PORT, &peers), HUB_VIP)), "hub ?");
+        assert_eq!(name(of_page(&frame(4, 0, BASE | 2, 0, &[1; 30]), BASE | 1)), "LAN TCP");
+        assert_eq!(name(of_page(&frame(3, 0, BASE | 2, 9999, &roam), BROADCAST)), "LAN UDP broadcast");
+        for k in [ADDRS, FRAMING, TEXT] {
+            assert!(!name(k).is_empty());
+        }
+        let names: std::collections::HashSet<String> = (0..KINDS).map(name).collect();
+        assert_eq!(names.len(), KINDS, "each its own");
+    }
+
+    #[test]
+    fn the_line() {
+        let mut now = vec![0u64; 2 * KINDS];
+        now[3] = 30_000_000;
+        now[KINDS + 3] = 1_000_000;
+        now[LAN_UDP] = 60_000_000;
+        now[KINDS + LAN_UDP] = 500_000;
+        now[6] = 100;
+        now[KINDS + 6] = 5;
+        let l = line(&now, &[], 300.0).unwrap();
+        assert!(l.starts_with("2.4 Mbit/s: LAN UDP 67 % (1.6 Mbit/s, 1667/s, 120.0 B each), car state 33 %"), "{l}");
+        assert!(l.ends_with(", 1 smaller kinds"), "{l}");
+        assert_eq!(line(&now, &now, 300.0), None);
+    }
+
+    #[test]
+    fn the_message_line() {
+        let mut now = vec![0u64; MSGS];
+        now[IN_BUNDLE] = 6000;
+        now[OUT_BUNDLE] = 3000;
+        now[OUT_PING] = 300;
+        now[OUT_WRITES] = 3000;
+        let l = msg_line(&now, &[], 300.0).unwrap();
+        assert!(l.starts_with("in 20/s (bundles 20, frames 0, control 0, pongs 0, pings 0), out 11/s (bundles 10,"), "{l}");
+        assert!(l.ends_with("pings 1, pongs 0) in 10 writes/s"), "{l}");
+        assert_eq!(msg_line(&now, &now, 300.0), None);
+    }
+}
