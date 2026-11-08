@@ -32,7 +32,11 @@ the installer signs it with your Apple ID.
 4. On the iPhone, go to **Settings > General > VPN & Device Management**, tap your Apple ID, and choose **Trust**.
 5. The first time, also turn on **Settings > Privacy & Security > Developer Mode** and restart the phone.
 
-[AltStore](https://altstore.io/) or SideStore work too.
+**Other signers:** [AltStore](https://altstore.io/) and SideStore sign with your Apple ID too. **Ksign** signs on the
+phone with a certificate file you import (a `.p12` and a `.mobileprovision`). In Safari on the phone, log in to
+GitHub, download the `.ipa` from the release, open it in Ksign and sign it. A shared certificate from a seller works,
+but Apple revokes those from time to time, and then you sign the app again with a new one. None of these needs JIT:
+the game runs in iOS's own web engine.
 
 **A free Apple ID's app stops opening after 7 days.** Install it again (Sideloadly can re-sign it for you when it
 runs on the same Wi-Fi). Your saves stay: they are only lost if you delete the app.

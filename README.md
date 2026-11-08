@@ -1,101 +1,87 @@
-> **This fork has two iOS apps:**
-> - **[client/](client/README.md): nfsu2.xyz with online play in an iPhone/iPad app.** GitHub builds it, so no Mac is
->   needed: install `NFSU2-unsigned.ipa` from the [client release](https://github.com/gabe4tw/nfsu2.xyz-ios/releases/tag/client) with Sideloadly.
-> - **[ios/](ios/README.md): a native build of the game.** It is made from your own `SPEED2.EXE`, has no online play,
->   and is untested.
->
-> Everything below is the upstream README ([th0mk/nfsu2-web](https://github.com/th0mk/nfsu2-web)).
+# NFSU2 for iPhone and iPad
 
-# Need for Speed: Underground 2 in the browser
+*Need for Speed: Underground 2* on iOS, in two forms:
 
-A fan project that runs the PC game *Need for Speed: Underground 2* (2004) in Google Chrome and Firefox. The game's
-x86 code is translated to C ahead of time and compiled to WebAssembly. Direct3D 9 runs on WebGPU and the sound on
-Web Audio. You bring your own copy of the game.
+- **The client** ([`client/`](client/README.md)): [nfsu2.xyz](https://nfsu2.xyz/) as a full-screen iPhone and iPad
+  app. You play the website's game with its saves and its online world: free roam, races and crews with everyone
+  else on nfsu2.xyz. It is what [nfsu2desktop](https://github.com/DJTOMATO/nfsu2desktop) is on Windows. This is the
+  one to use.
+- **The native build** ([`ios/`](ios/README.md)): the game compiled for iOS from your own copy of the PC game,
+  without a browser. It has no online play, needs a Mac and a paid Apple developer account to build and install, and
+  has not been run yet.
 
-Based on [NFSU2Recomp](https://github.com/TalhaMudo/NFSU2Recomp) by Talha Müderrisoğlu, the original x86 → C static
-recompiler for NFSU2. This project was forked from
-[its MIT-licensed version of 16 October 2026](https://github.com/TalhaMudo/NFSU2Recomp/tree/3d187ce7e5f1b99c0580866da4dbaa6d59dd23c7)
-and uses only code from that version.
+Both are unofficial. Neither is made or endorsed by nfsu2.xyz or Electronic Arts.
 
-> Not affiliated with or endorsed by Electronic Arts. This repository contains none of the game's code or data.
+## The client
 
-![The start page: Play, the controls, your saves and Online](docs/web/start-page.png)
+The app opens nfsu2.xyz in a full-screen web view and adds what a Safari tab lacks:
 
-## What you need
+- full screen, without browser bars or the Home indicator
+- the screen stays on while you play
+- sound plays even with the silent switch on
+- links to Discord and other sites open in Safari
+- downloads (the log, save backups) go to the Files app
 
-- **The game:** your own PC copy, patched to v1.2 (North America), with this exact `SPEED2.EXE` (other versions
-  will not work): 4,800,512 bytes, SHA-256 `f9dd86c054878ce6276beb07c1fd61874f7a1e4bf1f241b084c65b73e24168a7`.
-- **To build:** an Apple Silicon Mac (the tested setup) or Linux, Python 3, Node.js 20 or newer, Rust
-  ([rustup](https://rustup.rs)), and [wasi-sdk](https://github.com/WebAssembly/wasi-sdk/releases) 34 for that system
-  unpacked into `deps/`. On Windows,
-  build in WSL 2 with the clone in the Linux file system (`~/nfsu2-web`): under `/mnt/c` it builds much slower.
-- **To play:** the latest Google Chrome, or Firefox where it has WebGPU (Windows, macOS).
+It needs **iOS 26 or iPadOS 26**, because the game's graphics use WebGPU, which iOS added in version 26.
 
-## Build
+### Install it
 
-```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-web/gen.sh "/path/to/Need for Speed Underground 2/SPEED2.EXE"   # translate the game's code to C (into gen/)
-web/build.sh                                                    # compile it to out/web/nfsu2.wasm
-```
+You don't need a Mac. GitHub builds the app on every change to `client/` and puts it on this repository's
+[client release](https://github.com/gabe4tw/nfsu2.xyz-ios/releases/tag/client) as `NFSU2-unsigned.ipa`. You sign
+it when you install it:
 
-The generated C and the compiled module are made from the game, so they are never committed (`.gitignore`).
+- **[Sideloadly](https://sideloadly.io/) on Windows** with your Apple ID. A free Apple ID works, but the app then
+  stops opening after 7 days and has to be installed again. Your saves stay.
+- **Ksign, AltStore or SideStore** work too. Ksign needs a certificate file of your own rather than an Apple ID.
 
-## Play
+None of them needs JIT: the game runs in iOS's own web engine. The step-by-step instructions, including the
+settings to trust the app on the phone, are in [client/README.md](client/README.md).
 
-```sh
-web/start.sh --data "/path/to/Need for Speed Underground 2"
-```
+The app keeps its own saves, separate from Safari's. To bring yours over, use the site's **Cloud saves**
+passphrase.
 
-Open **http://localhost:8080/** in Chrome or Firefox and press **Play**. The start page has the settings, your saves
-and the controls. The player's guide is [docs/web/PLAYING.md](docs/web/PLAYING.md). The game plays in any of its
-thirteen languages, in Brazilian Portuguese, in Polish, in Turkish, in Hungarian, in Ukrainian, in Czech, in Slovak or in Greek; the
-dubbed voices and movies and the Portuguese, Polish, Hungarian, Ukrainian, Czech and Slovak text come from mods (Czech's
-with this repository's own texts for what it left in German or empty, `tools/lang/czech.json`), the Turkish text is this repository's own translation
-(`tools/lang/turkish.json`, with a mod's fonts), the Greek text a contributor's (`tools/lang/greek.json`, with Greek
-letters drawn into the game's fonts by `tools/greekfont`), as language packs. The menus and HUD can be redrawn at four times
-their size, from a mod as a texture pack.
+## The native build
 
-To play with friends, run the server behind HTTPS (other PCs need a secure context): `web/deploy/` has a Docker setup.
-Everyone who plays from the same server can meet in free roam.
+The native build is the [nfsu2-web](https://github.com/th0mk/nfsu2-web) project's native port, which builds the game
+as a Mac app, moved to iOS:
 
-## How it works
+- **How it works:** the game's x86 code is translated to C ahead of time from your own `SPEED2.EXE` (v1.2 North
+  America), then compiled for arm64 and drawn with Metal.
+- **What's iOS-specific:** a UIKit window, touch for the menus, Apple's on-screen controller for driving, the iOS
+  audio session, and the Files app for the game folder.
+- **Why there's no download:** the build contains code made from your copy of the game, so it can't be shared, and
+  nothing made from the game is ever committed.
 
-- **`tools/`:** a Python lifter (Capstone) turns every function of `SPEED2.EXE` into C.
-- **`runtime/`:** Windows, Direct3D 9, DirectSound and DirectInput, reimplemented. `runtime/web/` holds the browser
-  parts.
-- **`web/src/`:** the page. It runs the game's threads as workers on one shared memory, draws with WebGPU and plays
-  sound through an AudioWorklet.
-- **`web/server-rs/`:** the server, in Rust: serves the page, the module and your game folder, and connects players
-  for multiplayer.
+GitHub compiles its code on every change ([`ios/check.sh`](ios/check.sh)), but without the game, so nothing has been
+linked or run yet. Building it takes a Mac with Xcode. Running it most likely takes a paid developer account, because
+the game reserves more memory and address space than iOS gives an app by default. [ios/README.md](ios/README.md) has
+the steps and what to look at when something fails.
 
-The same tree still builds the native macOS version
-(`./gen.sh`, `./build.sh && ./link.sh`, `./run.sh`).
+## What's in this repository
+
+| Path | What |
+|---|---|
+| `client/` | The client app (Swift), its icon and project spec |
+| `.github/workflows/client.yml` | Builds the client's `.ipa` and publishes it on the `client` release |
+| `ios/` | The native build: the build script, the Xcode project spec, the compile check |
+| `.github/workflows/ios-check.yml` | Compiles the native build's code for iOS on every change |
+| `runtime/` | The game's runtime from nfsu2-web, with the iOS parts added behind `TARGET_OS_IPHONE` |
+| everything else | nfsu2-web as it was at commit [`11bdf2e`](https://github.com/th0mk/nfsu2-web/commit/11bdf2eca187492a2118889ccc4b1fb6021e1342): the lifter, the browser version and its server. [Its README](https://github.com/th0mk/nfsu2-web#readme) describes them. |
+
+nfsu2-web's own GitHub workflows (tests, server images) are turned off in this repository.
 
 ## Credits
 
-Based on Talha Müderrisoğlu's [NFSU2Recomp](https://github.com/TalhaMudo/NFSU2Recomp) (its MIT version, see the
-top), the static recompilation of NFSU2 for Apple Silicon, which in turn follows the method of
-[N64: Recompiled](https://github.com/N64Recomp/N64Recomp) and [XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
-The language packs are built from KyoriAsh's [Multi 13 languages mod](https://nfsmods.xyz/mod/5749) (with Lee-Ryo's
-Thai support, whose patch `runtime/language.c` follows), from TraduMix's and MixMods' Brazilian Portuguese
-translation (Fyro, Beater, Kerlyston F.; Junior_Djjr, SideWinder, Elyzandro), from PLProjekt's Polish translation
-(Daniel Graszka, MaDeR, Marcin Piech, Nati, Mateusz Wilkowski, alter), from VileStuff's
-[English Subtitles Fixed](https://nfsmods.xyz/mod/5286), from muntazam's
-[Turkish translation](https://www.moddb.com/mods/need-for-speed-underground-2-turkish-translation-patch) (its fonts), from
-GameHunter's [Hungarian translation](http://www.gamehunter.hu/2010/08/need-for-speed-underground-2-pc.html)
-(L_zooltan), from Clark X.'s [Ukrainian translation](https://kuli.com.ua/need-for-speed-underground-2), from ROXOR's and
-PINĎA & syn's Czech translation and from MixerX's Slovak one ([abcgames.cz](https://www.abcgames.cz/?p=preklady_zobraz&id=7774)). The texture packs are built from LunicAura106's
-[Upscaled HUD](https://nfsmods.xyz/mod/4319) and JeansBig's [Detailed Map](https://nfsmods.xyz/mod/4485), the
-uncensored songs from xGMVx's [Uncensored & Restored Soundtrack](https://nfsmods.xyz/mod/3649). Split screen is
-BirdSentinel (Zack)'s port of mihaits'
-[NFSU2-SplitScreen](https://github.com/mihaits/NFSU2-SplitScreen). Other changes follow what these mods found out
-about the game: ThirteenAG's, Aero_'s and xan1242's [Widescreen Fixes Pack](https://nfsmods.xyz/mod/3327), dstudnicki's
-[NFSU2 High FPS Audio Fix](https://github.com/dstudnicki/NFSU2HighFPSAudioFix), the ExOpts Team's
-[NFSU2 Extra Options](https://nfsmods.xyz/mod/290), MaxHwoy's [Show Hidden Races Mod](https://nfsmods.xyz/mod/1583)
-and thelink2012's [Visual Reputation Remover](https://nfsmods.xyz/mod/2773). The start page's Mods tab lists them all.
-Built with the help of Claude Code.
+- **The game on the web and the native port:** [nfsu2-web](https://github.com/th0mk/nfsu2-web) by th0mk, which runs
+  [nfsu2.xyz](https://nfsu2.xyz/).
+- **The recompilation it builds on:** Talha Müderrisoğlu's [NFSU2Recomp](https://github.com/TalhaMudo/NFSU2Recomp),
+  after the method of [N64: Recompiled](https://github.com/N64Recomp/N64Recomp) and
+  [XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
+- **The mods and translations** the game's language packs, texture packs and fixes come from are credited in
+  [nfsu2-web's README](https://github.com/th0mk/nfsu2-web#credits).
+- **The idea of a desktop client:** [nfsu2desktop](https://github.com/DJTOMATO/nfsu2desktop) by DJTOMATO.
 
 ## License
 
-MIT ([LICENSE](LICENSE)). *Need for Speed* and *Need for Speed: Underground 2* are trademarks of Electronic Arts Inc.
+MIT ([LICENSE](LICENSE)), as nfsu2-web. *Need for Speed* and *Need for Speed: Underground 2* are trademarks of
+Electronic Arts Inc. This repository contains none of the game's code or data.
