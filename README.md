@@ -1,5 +1,10 @@
-> **This fork adds an iOS build of the native port: see [ios/README.md](ios/README.md).** Everything else below is
-> upstream's README ([th0mk/nfsu2-web](https://github.com/th0mk/nfsu2-web)).
+> **This fork has two iOS apps:**
+> - **[client/](client/README.md): nfsu2.xyz with online play in an iPhone/iPad app.** GitHub builds it, so no Mac is
+>   needed: install `NFSU2-unsigned.ipa` from the [client release](https://github.com/gabe4tw/nfsu2.xyz-ios/releases/tag/client) with Sideloadly.
+> - **[ios/](ios/README.md): a native build of the game.** It is made from your own `SPEED2.EXE`, has no online play,
+>   and is untested.
+>
+> Everything below is the upstream README ([th0mk/nfsu2-web](https://github.com/th0mk/nfsu2-web)).
 
 # Need for Speed: Underground 2 in the browser
 
