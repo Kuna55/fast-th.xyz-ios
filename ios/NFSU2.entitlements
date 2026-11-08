@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- The game's 32-bit address space is one 4 GB reservation (runtime/mem.c),
+       plus a 1 GB stack for the guest thread (tests/boot.c): more address
+       space than an iOS app gets without this. -->
+  <key>com.apple.developer.kernel.extended-virtual-addressing</key>
+  <true/>
+  <!-- The game's memory, the renderer's buffers and the unpacked DXT
+       textures go past the default limit on most iPhones. -->
+  <key>com.apple.developer.kernel.increased-memory-limit</key>
+  <true/>
+</dict>
+</plist>

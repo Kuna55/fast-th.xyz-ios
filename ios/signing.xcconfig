@@ -1,0 +1,8 @@
+// Signing for the iOS app.  Put your own values in ios/local.xcconfig (not
+// committed), for example:
+//   DEVELOPMENT_TEAM = ABCDE12345
+//   PRODUCT_BUNDLE_IDENTIFIER = com.yourname.nfsu2
+// Your team ID is in Xcode > Settings > Accounts, or developer.apple.com > Membership.
+PRODUCT_BUNDLE_IDENTIFIER = org.nfsu2.ios.$(USER)
+DEVELOPMENT_TEAM =
+#include? "local.xcconfig"

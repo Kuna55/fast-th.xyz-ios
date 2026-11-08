@@ -1,0 +1,60 @@
+# The Xcode project for the iOS app, made with XcodeGen:
+#   brew install xcodegen
+#   cd ios && xcodegen          -> ios/NFSU2.xcodeproj (not committed)
+# Set your team and a bundle id of your own in ios/local.xcconfig (see
+# ios/README.md), or in Xcode under Signing & Capabilities.
+name: NFSU2
+options:
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+configFiles:
+  Debug: signing.xcconfig
+  Release: signing.xcconfig
+targets:
+  NFSU2:
+    type: application
+    platform: iOS
+    sources:
+      - path: main.m
+      - path: ../app/registry-defaults.txt
+        buildPhase: resources
+      - path: Info.plist
+        buildPhase: none
+      - path: NFSU2.entitlements
+        buildPhase: none
+    preBuildScripts:
+      # the game and the runtime: ios/build.sh (the first build compiles the
+      # whole lifted game, several minutes; later ones only what changed)
+      - name: Build the game (ios/build.sh)
+        script: |
+          cd "${PROJECT_DIR}/.." && MINIOS="${IPHONEOS_DEPLOYMENT_TARGET}" ios/build.sh
+        basedOnDependencyAnalysis: false
+        showEnvVars: false
+    settings:
+      base:
+        INFOPLIST_FILE: Info.plist
+        CODE_SIGN_ENTITLEMENTS: NFSU2.entitlements
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTED_PLATFORMS: iphoneos            # device only: out/ios is built for arm64 iOS, not the simulator
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        ARCHS: arm64
+        ENABLE_BITCODE: NO
+        ENABLE_USER_SCRIPT_SANDBOXING: NO       # ios/build.sh reads gen/ and runtime/, writes out/ios
+        CLANG_ENABLE_OBJC_ARC: YES
+        GENERATE_INFOPLIST_FILE: NO
+        DEAD_CODE_STRIPPING: YES
+        OTHER_LDFLAGS:
+          - -filelist
+          - $(PROJECT_DIR)/../out/ios/nfsu2.filelist
+          - -framework UIKit
+          - -framework Metal
+          - -framework QuartzCore
+          - -framework CoreGraphics
+          - -framework ImageIO
+          - -framework GameController
+          - -framework AudioToolbox
+          - -framework AVFoundation
+          - -lc++

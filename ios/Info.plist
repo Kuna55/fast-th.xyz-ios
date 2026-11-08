@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>      <string>en</string>
+  <key>CFBundleExecutable</key>             <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key>             <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
+  <key>CFBundleName</key>                   <string>NFSU2</string>
+  <key>CFBundleDisplayName</key>            <string>NFSU2</string>
+  <key>CFBundlePackageType</key>            <string>APPL</string>
+  <key>CFBundleShortVersionString</key>     <string>1.0</string>
+  <key>CFBundleVersion</key>                <string>1</string>
+  <key>LSRequiresIPhoneOS</key>             <true/>
+  <key>LSApplicationCategoryType</key>      <string>public.app-category.racing-games</string>
+  <key>UIRequiredDeviceCapabilities</key>   <array><string>arm64</string><string>metal</string></array>
+  <key>UILaunchScreen</key>                 <dict/>
+
+  <!-- Scene life cycle (required from the release after iOS 26); one game window. -->
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key> <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key>  <string>Game</string>
+          <key>UISceneDelegateClassName</key>  <string>NfsuSceneDelegate</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+
+  <!-- Landscape, full screen, nothing on top of the game. -->
+  <key>UISupportedInterfaceOrientations</key>
+  <array><string>UIInterfaceOrientationLandscapeRight</string><string>UIInterfaceOrientationLandscapeLeft</string></array>
+  <key>UISupportedInterfaceOrientations~ipad</key>
+  <array><string>UIInterfaceOrientationLandscapeRight</string><string>UIInterfaceOrientationLandscapeLeft</string></array>
+  <key>UIRequiresFullScreen</key>           <true/>
+  <key>UIStatusBarHidden</key>              <true/>
+  <key>UIViewControllerBasedStatusBarAppearance</key> <true/>
+  <!-- 120 Hz on a ProMotion iPhone (the frame pacer follows the display). -->
+  <key>CADisableMinimumFrameDurationOnPhone</key> <true/>
+
+  <!-- Documents in the Files app ("On My iPhone > NFSU2"): the game goes into
+       Game/, settings.ini, saves (Overlay/) and logs (Logs/) are there too. -->
+  <key>UIFileSharingEnabled</key>           <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key> <true/>
+
+  <!-- Controllers drive the game; Game Mode while it runs (iOS 18). -->
+  <key>GCSupportsControllerUserInteraction</key> <true/>
+  <key>GCSupportedGameControllers</key>
+  <array><dict><key>ProfileName</key><string>ExtendedGamepad</string></dict></array>
+  <key>GCSupportsGameMode</key>             <true/>
+
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>To find and play with other Need for Speed Underground 2 players on your network.</string>
+</dict>
+</plist>

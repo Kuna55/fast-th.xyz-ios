@@ -19,3 +19,7 @@ __pycache__/
 *.o
 *.log
 .DS_Store
+
+# iOS: the generated Xcode project and your signing settings
+/ios/NFSU2.xcodeproj/
+/ios/local.xcconfig

@@ -1,3 +1,6 @@
+> **This fork adds an iOS build of the native port: see [ios/README.md](ios/README.md).** Everything else below is
+> upstream's README ([th0mk/nfsu2-web](https://github.com/th0mk/nfsu2-web)).
+
 # Need for Speed: Underground 2 in the browser
 
 A fan project that runs the PC game *Need for Speed: Underground 2* (2004) in Google Chrome and Firefox. The game's
