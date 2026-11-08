@@ -1,0 +1,21 @@
+# Compile runtime/ for iOS on a GitHub Mac (no game needed: ios/check.sh).
+# The full app needs the game's lifted code from your own SPEED2.EXE, so it is
+# built by ios/build.sh, not here.
+name: ios-check
+on:
+  push:
+    branches: [main]
+    paths: ['runtime/**', 'ios/**', 'tests/boot.c', link.sh, .github/workflows/ios-check.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode
+        run: xcodebuild -version && xcrun --sdk iphoneos --show-sdk-version
+      - name: Compile runtime/ for iOS and macOS
+        run: ios/check.sh
