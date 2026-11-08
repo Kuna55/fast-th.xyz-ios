@@ -236,3 +236,8 @@ int gamepad_axis_by_name(const char *nm){
     if (!strcasecmp(nm, "R2")) return PAD_AXIS_RT;
     return -1;
 }
+
+/* coop.c's local seats are the browser's (runtime/web/input_web.c); natively
+ * there are none, so player 2 never joins from here */
+int gamepad_read_local(unsigned seat, PadState *s){ (void)seat; if (s) memset(s, 0, sizeof *s); return 0; }
+uint32_t gamepad_local_join_stamp(unsigned seat){ (void)seat; return 0; }

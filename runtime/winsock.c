@@ -567,6 +567,20 @@ int winsock_lan_identity(NetIdent *id, char *why, size_t whysz){
 #ifdef __wasm__
         uint64_t hsh = 0;
         { char hn[256] = ""; gethostname(hn, sizeof hn); hsh = fnv(hn, strlen(hn), fnv("NFSU2-MAC", 9, 0)); }
+#elif TARGET_OS_IPHONE
+        /* no host UUID for an iOS app (and every iPhone is "localhost"): a
+         * random id kept in the app's Library, the same on every start */
+        uint64_t hsh = 0;
+        { char p[1024]; const char *home = getenv("HOME");
+          snprintf(p, sizeof p, "%s/Library/nfsu2-netid", home ? home : "/tmp");
+          FILE *f = fopen(p, "rb");
+          if (!f || fread(&hsh, sizeof hsh, 1, f) != 1 || !hsh){
+              if (f) fclose(f);
+              arc4random_buf(&hsh, sizeof hsh); hsh |= 1;
+              if ((f = fopen(p, "wb"))){ fwrite(&hsh, sizeof hsh, 1, f); fclose(f); f = NULL; }
+          }
+          if (f) fclose(f);
+          hsh = fnv(&hsh, sizeof hsh, fnv("NFSU2-MAC", 9, 0)); }
 #else
         uuid_t u; struct timespec to = { 1, 0 };
         uint64_t hsh = 0;

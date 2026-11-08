@@ -41,11 +41,13 @@ int  gamepad_env_flag(const char *nm, int dflt);
 void gamepad_init(void);
 /* Snapshot of the virtual pad after dead zones; returns s->connected. */
 int  gamepad_read(PadState *s);
-#ifdef __wasm__
 /* Shared-engine local seats, 0..5; independent of the legacy auto-selected
- * pad. Returns neutral input on disconnect or an inconsistent mailbox read. */
+ * pad. Returns neutral input on disconnect or an inconsistent mailbox read.
+ * Native builds (gamepad.m) have no seats: split-screen co-op's player 2
+ * joins from the browser only. */
 int gamepad_read_local(unsigned seat, PadState *s);
 uint32_t gamepad_local_join_stamp(unsigned seat);
+#ifdef __wasm__
 /* co-op free roam: the local seat whose controller is player 2's (-1 none) */
 void gamepad_local_coop(int seat);
 /* Autotest only: control one seat without changing any other seat. key -1

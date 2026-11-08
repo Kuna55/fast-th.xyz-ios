@@ -894,10 +894,11 @@ static void app_open_log(void){
     else if (getenv("NFSU2_APPSUPPORT")) snprintf(dir, sizeof dir, "%s/Logs", g_support);
 #if TARGET_OS_IPHONE
     else snprintf(dir, sizeof dir, "%s/Logs", g_support);
+    (void)home;
 #else
     else if (home) snprintf(dir, sizeof dir, "%s/Library/Logs/NFSU2", home);
-#endif
     else return;
+#endif
     mkdirs(dir);
     /* The HD build writes its own log, so two builds run side by side do not
      * overwrite each other's log.  Fresh on every run; the previous is kept. */
