@@ -2,8 +2,19 @@
  *
  * On macOS the window must live on the MAIN thread.  The guest already runs
  * on a separate thread, so that fits: the main thread runs the NSApplication
- * loop, the guest thread queues draw commands.                           */
+ * loop, the guest thread queues draw commands.
+ *
+ * iOS (TARGET_OS_IPHONE): the same renderer.  The window, the view, touch
+ * input and the main loop's event pump are the UIKit section further down
+ * ("iOS: window, view, touch"); the screen is always the game's full-screen
+ * surface (g_fs), and DXT textures are unpacked to BGRA8 on upload where the
+ * GPU has no BC formats (iPhones, see BC_UNPACK).                         */
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <QuartzCore/CAMetalLayer.h>
 #import <QuartzCore/QuartzCore.h>
 
@@ -21,10 +32,21 @@
 #include <time.h>
 #include <stdlib.h>
 
+#if TARGET_OS_IPHONE
+static UIWindow        *g_win;
+/* mouse_mk() reads Shift/Control from AppKit's modifier flags; a touch
+ * carries none (a hardware keyboard's modifiers reach the game as keys,
+ * keyboard_ios.m). */
+typedef NSUInteger NSEventModifierFlags;
+enum { NSEventModifierFlagShift = 1u << 17, NSEventModifierFlagControl = 1u << 18 };
+#else
 static NSWindow        *g_win;
 NSWindow *metal_nswindow(void){ return g_win; }          /* keyboard_mac.m */
+#endif
 #import <ImageIO/ImageIO.h>
+#if !TARGET_OS_IPHONE
 #import <CoreServices/CoreServices.h>
+#endif
 
 static CAMetalLayer    *g_layer;
 static long             g_skip_empty;   /* frame with no content: do not present */
@@ -178,6 +200,7 @@ void com_request_reset(void);
 static _Atomic int g_mouse_dx = 0, g_mouse_dy = 0, g_mouse_dz = 0;
 static _Atomic unsigned g_mouse_btn = 0;
 
+#if !TARGET_OS_IPHONE      /* iOS: the touch versions below ("iOS: window, view, touch") */
 void metal_mouse_add(int dx, int dy){                 /* synthetic motion (test) */
     atomic_fetch_add(&g_mouse_dx, dx); atomic_fetch_add(&g_mouse_dy, dy); }
 void metal_fill_mouse(unsigned char *dst, unsigned n){
@@ -201,6 +224,7 @@ void metal_get_cursor(int *x, int *y){
     if (x) *x = atomic_load(&g_mouse_x);
     if (y) *y = atomic_load(&g_mouse_y);
 }
+#endif
 /* The window size the game thinks it has (GetClientRect/GetWindowRect).  The
  * game scales GetCursorPos into its own UI space by this rectangle; while a
  * fixed 1280x720 was returned, at 1280x960 the cursor drifted down by a
@@ -267,7 +291,9 @@ static void mouse_delta_scale(double *sx, double *sy){
 /* --- keyboard: runtime/keyboard_mac.m (NSEvent -> Win32 messages and
  * DirectInput state), runtime/keyboard.c (shared key state, host messages) */
 #include "kbd.h"
+#if !TARGET_OS_IPHONE
 int  kbdmac_handle(NSEvent *ev);
+#endif
 void kbdmac_tick(void);
 void kbdmac_release_all(const char *why);
 
@@ -967,6 +993,81 @@ static MTLPixelFormat d3dfmt_to_mtl(unsigned f, unsigned *blk, unsigned *bpb){
     default: *blk=0; *bpb=0; return MTLPixelFormatInvalid;
     }
 }
+/* --- BC_UNPACK: DXT on a GPU without BC formats ----------------------------
+ * d3dfmt_to_mtl() above is the GUEST's layout (what LockRect hands the game
+ * and what metal_level_pitch/rows report).  An iPhone GPU has no BC1-3
+ * (supportsBCTextureCompression is NO there; iPads with an M chip have them),
+ * so such a texture is created as BGRA8 and every DXT level is unpacked on
+ * upload, as the web build does on phones (web/src/gpu/dxt.ts, same rules:
+ * D3D10 BC1-3, bit-replicated 5/6-bit colours).  Unpacked, DXT1 takes 8x
+ * and DXT3/5 4x the GPU memory.  NFSU2_BC_UNPACK=1/0 forces it either way. */
+static int g_bc_unpack = -1;
+static int bc_unpack(void){
+    if (g_bc_unpack < 0){
+        int hw = 1;
+#if TARGET_OS_IPHONE
+        hw = 0;
+        if (@available(iOS 16.4, *)) hw = g_dev && [g_dev supportsBCTextureCompression];
+#endif
+        const char *e = ENVC("NFSU2_BC_UNPACK");
+        g_bc_unpack = (e && *e) ? (*e != '0') : !hw;
+        fprintf(stderr, "metal: BC texture formats %s -> DXT textures %s\n",
+                hw ? "supported" : "NOT supported", g_bc_unpack ? "unpacked to BGRA8 on upload" : "uploaded as BC1-3");
+    }
+    return g_bc_unpack;
+}
+static int fmt_is_dxt(unsigned f){ return f == 0x31545844u || f == 0x33545844u || f == 0x35545844u; }
+/* The Metal format a texture of D3D format f is CREATED with. */
+static MTLPixelFormat gpu_fmt(unsigned f, unsigned *blk, unsigned *bpb){
+    MTLPixelFormat pf = d3dfmt_to_mtl(f, blk, bpb);
+    if (pf != MTLPixelFormatInvalid && fmt_is_dxt(f) && bc_unpack()){ *blk = 1; *bpb = 4; return MTLPixelFormatBGRA8Unorm; }
+    return pf;
+}
+static inline uint8_t c5x(unsigned v){ return (uint8_t)((v << 3) | (v >> 2)); }
+static inline uint8_t c6x(unsigned v){ return (uint8_t)((v << 2) | (v >> 4)); }
+/* One w x h level of DXT1/3/5 (pitch = bytes per row of 4x4 blocks) into
+ * BGRA8, w * 4 bytes per row. */
+static void dxt_unpack(unsigned f, const uint8_t *src, unsigned pitch, unsigned w, unsigned h, uint32_t *out){
+    const int dxt1 = f == 0x31545844u, dxt5 = f == 0x35545844u;
+    const unsigned bsz = dxt1 ? 8u : 16u, co = dxt1 ? 0u : 8u;
+    const unsigned bw = (w + 3) / 4, bh = (h + 3) / 4;
+    uint32_t pal[4]; uint8_t alpha[16], at[8];
+    for (unsigned by = 0; by < bh; by++)
+        for (unsigned bx = 0; bx < bw; bx++){
+            const uint8_t *b = src + (size_t)by * pitch + (size_t)bx * bsz;
+            if (dxt5){
+                unsigned a0 = b[0], a1 = b[1];
+                at[0] = (uint8_t)a0; at[1] = (uint8_t)a1;
+                if (a0 > a1) for (int i = 1; i < 7; i++) at[i + 1] = (uint8_t)(((7 - i) * a0 + i * a1) / 7);
+                else { for (int i = 1; i < 5; i++) at[i + 1] = (uint8_t)(((5 - i) * a0 + i * a1) / 5); at[6] = 0; at[7] = 255; }
+                uint32_t lo = b[2] | b[3] << 8 | (uint32_t)b[4] << 16, hi = b[5] | b[6] << 8 | (uint32_t)b[7] << 16;
+                for (int i = 0; i < 8; i++){ alpha[i] = at[(lo >> (3 * i)) & 7]; alpha[i + 8] = at[(hi >> (3 * i)) & 7]; }
+            } else if (!dxt1){
+                for (int i = 0; i < 8; i++){ unsigned v = b[i]; alpha[2 * i] = (uint8_t)((v & 15) * 17); alpha[2 * i + 1] = (uint8_t)((v >> 4) * 17); }
+            }
+            unsigned c0 = b[co] | b[co + 1] << 8, c1 = b[co + 2] | b[co + 3] << 8;
+            unsigned r0 = c5x(c0 >> 11), g0 = c6x((c0 >> 5) & 63), b0 = c5x(c0 & 31);
+            unsigned r1 = c5x(c1 >> 11), g1 = c6x((c1 >> 5) & 63), b1 = c5x(c1 & 31);
+            pal[0] = b0 | g0 << 8 | r0 << 16 | 0xFF000000u;
+            pal[1] = b1 | g1 << 8 | r1 << 16 | 0xFF000000u;
+            if (!dxt1 || c0 > c1){
+                pal[2] = (2 * b0 + b1) / 3 | ((2 * g0 + g1) / 3) << 8 | ((2 * r0 + r1) / 3) << 16 | 0xFF000000u;
+                pal[3] = (b0 + 2 * b1) / 3 | ((g0 + 2 * g1) / 3) << 8 | ((r0 + 2 * r1) / 3) << 16 | 0xFF000000u;
+            } else {
+                pal[2] = (b0 + b1) / 2 | ((g0 + g1) / 2) << 8 | ((r0 + r1) / 2) << 16 | 0xFF000000u;
+                pal[3] = 0;
+            }
+            uint32_t idx = b[co + 4] | b[co + 5] << 8 | (uint32_t)b[co + 6] << 16 | (uint32_t)b[co + 7] << 24;
+            unsigned ph = h - by * 4 < 4 ? h - by * 4 : 4, pw = w - bx * 4 < 4 ? w - bx * 4 : 4;
+            for (unsigned py = 0; py < ph; py++){
+                uint32_t *row = out + (size_t)(by * 4 + py) * w + bx * 4;
+                for (unsigned px = 0; px < pw; px++){
+                    unsigned i = py * 4 + px; uint32_t c = pal[(idx >> (2 * i)) & 3];
+                    row[px] = dxt1 ? c : ((c & 0xFFFFFFu) | (uint32_t)alpha[i] << 24);
+                }
+            }
+        }
+}
 
 unsigned metal_create_texture_ex(unsigned w, unsigned h, unsigned levels,
                                  unsigned d3dfmt, unsigned is_rt);
@@ -1001,7 +1102,7 @@ unsigned metal_create_texture_ex(unsigned w, unsigned h, unsigned levels,
                                  unsigned d3dfmt, unsigned is_rt){
     if (!g_dev || (g_texn >= MAXTEX && !g_ntfree)) return 0;
     unsigned blk, bpb;
-    MTLPixelFormat pf = d3dfmt_to_mtl(d3dfmt, &blk, &bpb);
+    MTLPixelFormat pf = gpu_fmt(d3dfmt, &blk, &bpb);
     if (pf == MTLPixelFormatInvalid) return 0;
     if (!levels) levels = 1;
     MTLTextureDescriptor *td =
@@ -3039,7 +3140,7 @@ unsigned metal_create_texture_cube(unsigned edge, unsigned levels,
                                    unsigned d3dfmt, unsigned is_rt){
     if (!g_dev || (g_texn >= MAXTEX && !g_ntfree)) return 0;
     unsigned blk, bpb;
-    MTLPixelFormat pf = d3dfmt_to_mtl(d3dfmt, &blk, &bpb);
+    MTLPixelFormat pf = gpu_fmt(d3dfmt, &blk, &bpb);
     if (pf == MTLPixelFormatInvalid) return 0;
     if (!levels) levels = 1;
     MTLTextureDescriptor *td =
@@ -3080,6 +3181,14 @@ void metal_upload_texture_face(unsigned id_, unsigned level, unsigned face,
     if (!lw) lw = 1; if (!lh) lh = 1;
     MTLRegion rg = MTLRegionMake2D(0, 0, lw, lh);
     struct timespec _u0; if (g_perflog) clock_gettime(CLOCK_MONOTONIC, &_u0);
+    /* BC_UNPACK: the texture is BGRA8; unpack this level and upload that */
+    void *unpacked = NULL;
+    if (fmt_is_dxt(d3dfmt) && g_tex[id_].pixelFormat == MTLPixelFormatBGRA8Unorm){
+        unpacked = malloc((size_t)lw * lh * 4);
+        if (!unpacked) return;
+        dxt_unpack(d3dfmt, (const uint8_t *)data, pitch, lw, lh, (uint32_t *)unpacked);
+        data = unpacked; pitch = lw * 4;
+    }
     if (g_tex_cube[id_]){
         if (face > 5u) face = 0u;
         [g_tex[id_] replaceRegion:rg mipmapLevel:level slice:face
@@ -3087,6 +3196,7 @@ void metal_upload_texture_face(unsigned id_, unsigned level, unsigned face,
     } else {
         [g_tex[id_] replaceRegion:rg mipmapLevel:level withBytes:data bytesPerRow:pitch];
     }
+    free(unpacked);
     if (g_perflog){ struct timespec _u1; clock_gettime(CLOCK_MONOTONIC, &_u1);
         perflog_event(PL_TEXUP, (uint64_t)(_u1.tv_sec - _u0.tv_sec) * 1000000000ull + (uint64_t)_u1.tv_nsec - (uint64_t)_u0.tv_nsec,
                       (uint64_t)pitch * (blk == 1 ? lh : (lh + blk - 1) / blk)); }
@@ -3345,6 +3455,54 @@ static void display_hz_apply(const char *why){
     if (old && old != hz) fprintf(stderr, "metal: display refresh %d Hz -> %d Hz (%s)\n", old, hz, why);
 }
 static void vsync_link_range(void);
+#if TARGET_OS_IPHONE
+/* iOS: one screen, always "full screen".  The game's surface is the screen
+ * in landscape (the app only runs in landscape), at the screen's native
+ * pixels (nativeScale: the panel's own density, also on a Display Zoom
+ * setting), capped by NFSMAXPIX (widescreen.c; the app's default keeps a
+ * phone near 2 megapixels, see bundle.m). */
+static _Atomic int g_scr_ppp1000 = 0;
+static UIScreen *ios_screen(void){
+    UIWindowScene *ws = g_win ? g_win.windowScene : nil;
+    if (ws) return ws.screen;
+    for (UIScene *s in [UIApplication sharedApplication].connectedScenes)
+        if ([s isKindOfClass:[UIWindowScene class]]) return ((UIWindowScene *)s).screen;
+    return nil;
+}
+static void display_hz_update(UIScreen *sc){
+    if (!sc) return;
+    int hz = (int)sc.maximumFramesPerSecond;
+    if (hz <= 0) hz = 60;
+    if (hz != g_screen_hz){
+        g_screen_hz = hz;
+        g_link_hz = 0;
+        vsync_link_range();
+    }
+    display_hz_apply("screen maximumFramesPerSecond");
+}
+static void scr_cache(void){
+    @autoreleasepool {
+        UIScreen *sc = ios_screen();
+        if (!sc) return;
+        display_hz_update(sc);
+        CGSize b = sc.bounds.size;                 /* points, current orientation */
+        CGFloat w = fmax(b.width, b.height), h = fmin(b.width, b.height);
+        CGFloat k = sc.nativeScale; if (k < 1.0) k = 1.0;
+        atomic_store(&g_scr_cw, (int)w);
+        atomic_store(&g_scr_ch, (int)h);
+        atomic_store(&g_scr_s100, (int)lround(k * 100.0));
+        atomic_store(&g_scr_ppp1000, (int)lround(k * 1000.0));
+        atomic_store(&g_fs_pw, (int)lround(w * k));
+        atomic_store(&g_fs_ph, (int)lround(h * k));
+        atomic_store(&g_cont_w, (int)w); atomic_store(&g_cont_h, (int)h);
+        atomic_store(&g_fs, 1);
+        static int shown = 0;
+        if (shown++ < 4)
+            fprintf(stderr, "metal: screen %.0fx%.0f pt (landscape), native scale x%.2f = %dx%d pixels, %d Hz\n",
+                    (double)w, (double)h, (double)k, atomic_load(&g_fs_pw), atomic_load(&g_fs_ph), g_screen_hz);
+    }
+}
+#else
 static void display_hz_update(NSScreen *sc){
     if (!sc) return;
     int hz = 60;
@@ -3402,6 +3560,7 @@ static void scr_cache(void){
                     [sc frame].size.width, [sc frame].size.height, [sc backingScaleFactor], pw, ppp);
     }
 }
+#endif /* TARGET_OS_IPHONE */
 /* For widescreen.c (NFSU2_RENDER): backing pixels per point and physical
  * panel pixels per point of the window's screen (0 = unknown). */
 void metal_screen_metrics(double *backing, double *panel){
@@ -3430,6 +3589,9 @@ void metal_native_size(unsigned gw, unsigned gh, unsigned *ow, unsigned *oh){
         /* exactly the bound win_apply_size will apply */
         aw = cw; ah = ch; s = s100 / 100.0;
     } else {
+#if TARGET_OS_IPHONE
+        return;                                       /* scr_cache() runs before the guest starts */
+#else
         /* No cached value: estimate with CoreGraphics (thread-safe). */
         CGDirectDisplayID d = CGMainDisplayID();
         CGRect b = CGDisplayBounds(d);                /* in POINTS */
@@ -3440,6 +3602,7 @@ void metal_native_size(unsigned gw, unsigned gh, unsigned *ow, unsigned *oh){
                 CGDisplayModeRelease(m); }
         /* menu bar / notch (<=32) + title bar (<=32) */
         aw = b.size.width; ah = b.size.height - 64.0;
+#endif
     }
     if (s < 1.0) s = 1.0;
     if (aw < 320.0 || ah < 240.0) return;
@@ -3537,6 +3700,18 @@ static _Atomic int g_win_sized = 0;
  * and "fullscreen animation running" (windowDidResize must not reset then). */
 static CGFloat g_applied_cw = 0, g_applied_ch = 0;
 static int g_fs_transition = 0;
+#if TARGET_OS_IPHONE
+static void win_apply_size(unsigned w, unsigned h){
+    if (!g_layer) return;
+    g_layer.drawableSize = CGSizeMake((CGFloat)w, (CGFloat)h);
+    atomic_store(&g_draw_w, (int)w); atomic_store(&g_draw_h, (int)h);
+    CGSize c = g_layer.bounds.size;
+    if (c.width > 1.0 && c.height > 1.0){
+        atomic_store(&g_cont_w, (int)c.width); atomic_store(&g_cont_h, (int)c.height); }
+    fprintf(stderr, "metal: screen: drawable %ux%u pixels, view %.0fx%.0f points\n",
+            w, h, (double)c.width, (double)c.height);
+}
+#else
 static void win_apply_size(unsigned w, unsigned h){
     if (!g_layer) return;
     CGFloat s = g_win ? [g_win backingScaleFactor]
@@ -3563,6 +3738,7 @@ static void win_apply_size(unsigned w, unsigned h){
             fs ? "fullscreen" : "window", w, h, (double)c.width, (double)c.height, (double)s,
             exact ? "1:1" : "scaled to the window");
 }
+#endif
 /* The VIEW (pixels) the settings menu rows are based on: in fullscreen the
  * fullscreen content, in a window the window's current content; if the
  * window has not been sized yet, the size it will get on first open.
@@ -4059,7 +4235,9 @@ void metal_early_init(void){
     /* Measure the screen geometry on the main thread BEFORE the guest thread
      * starts: the guest picks the drawing size in CreateDevice from it
      * (boot.c calls this function before pthread_create). */
+#if !TARGET_OS_IPHONE
     [NSApplication sharedApplication];
+#endif
     scr_cache();
     /* App Nap / timer coalescing OFF.  While the game window is not in
      * front, macOS drops the process to background QoS and the work moves
@@ -4378,6 +4556,7 @@ static void dump_one_texture_face(unsigned id_, long frame, int face){
     dump_texture(off, tag);
 }
 
+#if !TARGET_OS_IPHONE      /* the AppKit window; iOS: "iOS: window, view, touch" below */
 /* The game draws its own cursor; if the macOS cursor is visible too there
  * are two cursors on screen.  Hide the system cursor while inside the game
  * area, bring it back on leaving. */
@@ -4627,6 +4806,322 @@ static void power_state_changed(void){
     (void)s; lifecycle_request_quit("Cmd-Q / Dock / logout");
     return NSTerminateCancel; }
 @end
+#else /* TARGET_OS_IPHONE */
+/* ===== iOS: window, view, touch ===========================================
+ * The app's scene delegate (runtime/ios_app.m) hands over its window scene
+ * and starts boot.c's main from the run loop.  metal_run_main_loop() opens
+ * the game's window on that scene and runs the Mac's frame loop, pumping
+ * UIKit's run loop where the Mac drains its NSEvent queue (ios_pump).
+ *
+ * Touch, as the web build has it on phones: a tap is a left click on the
+ * game's menus (the game draws its own cursor), a drag moves the cursor;
+ * two fingers are Escape (back in the menus, the pause menu in a race).
+ * Driving is a controller's job: a connected one, or the on-screen one
+ * (GCVirtualController, gamepad.m sees it as any other controller; hidden
+ * while a real controller is connected; NFSU2_TOUCH_PAD=0 turns it off). */
+#import <GameController/GameController.h>
+#include "gamepad.h"
+void lifecycle_request_quit(const char *why);
+void lifecycle_set_active(int on, const char *why);
+void lifecycle_tick(void);
+void hfr_note_vsync(double ts, double duration);
+static UIWindowScene *g_ios_scene;
+static _Atomic int g_ios_bg = 0;                /* in the background: iOS allows no GPU work */
+void metal_ios_attach_scene(UIWindowScene *s){ g_ios_scene = s; }
+
+/* --- the mouse the game sees: one change a frame ----------------------------
+ * The game reads the mouse once a frame and its menus pick what is under the
+ * cursor only in a frame the cursor moved (runtime/web/input_web.c has the
+ * measurements).  A tap is a move, a press and a release within ~100 ms, so
+ * the changes are queued and the game takes them a frame at a time: the
+ * moves up to the next button change, or that button change.  A finger that
+ * lands where the cursor already is first puts it two menu units aside for a
+ * frame (MS_HOP), so the menu sees a move. */
+enum { MS_MOVE, MS_BTN, MS_HOP };
+typedef struct { int kind, x, y, dx, dy; unsigned btn; uint64_t us; } MouseStep;
+#define MOUSE_STEPS 64
+static MouseStep g_ms[MOUSE_STEPS];
+static int g_ms_head, g_ms_n;
+static int g_view_x = 640, g_view_y = 360, g_view_dx, g_view_dy;   /* what the game has taken */
+static unsigned g_view_btn;
+static long g_view_frame = -1;
+static pthread_mutex_t g_ms_mx = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ms_now_us(void){ struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000u + (uint64_t)t.tv_nsec / 1000u; }
+static void step_take(void){                  /* g_ms_mx held */
+    const MouseStep *s = &g_ms[g_ms_head];
+    if (s->kind != MS_BTN){ g_view_x = s->x; g_view_y = s->y; g_view_dx += s->dx; g_view_dy += s->dy; }
+    else g_view_btn = s->btn;
+    g_ms_head = (g_ms_head + 1) % MOUSE_STEPS; g_ms_n--;
+}
+static void mouse_step(MouseStep s){
+    s.us = ms_now_us();
+    pthread_mutex_lock(&g_ms_mx);
+    MouseStep *last = g_ms_n ? &g_ms[(g_ms_head + g_ms_n - 1) % MOUSE_STEPS] : 0;
+    if (s.kind == MS_MOVE && last && last->kind == MS_MOVE){
+        last->x = s.x; last->y = s.y; last->dx += s.dx; last->dy += s.dy;
+    } else {
+        if (g_ms_n == MOUSE_STEPS) step_take();
+        g_ms[(g_ms_head + g_ms_n) % MOUSE_STEPS] = s; g_ms_n++;
+    }
+    pthread_mutex_unlock(&g_ms_mx);
+}
+static void mouse_take(void){                 /* guest thread */
+    long f = atomic_load(&g_frames_drawn);
+    uint64_t now = ms_now_us();
+    pthread_mutex_lock(&g_ms_mx);
+    while (g_ms_n && now - g_ms[g_ms_head].us > 1000000u) step_take();   /* the game was not reading */
+    if (f != g_view_frame){
+        g_view_frame = f;
+        if (g_ms_n && g_ms[g_ms_head].kind != MS_MOVE) step_take();
+        else while (g_ms_n && g_ms[g_ms_head].kind == MS_MOVE) step_take();
+    }
+    pthread_mutex_unlock(&g_ms_mx);
+}
+void metal_mouse_add(int dx, int dy){
+    pthread_mutex_lock(&g_ms_mx); g_view_dx += dx; g_view_dy += dy; pthread_mutex_unlock(&g_ms_mx);
+}
+void metal_fill_mouse(unsigned char *dst, unsigned n){
+    if (n < 20) return;
+    mouse_take();
+    pthread_mutex_lock(&g_ms_mx);
+    int dx = g_view_dx, dy = g_view_dy; unsigned b = g_view_btn;
+    g_view_dx = g_view_dy = 0;
+    pthread_mutex_unlock(&g_ms_mx);
+    int dz = atomic_exchange(&g_mouse_dz, 0);
+    memcpy(dst + 0, &dx, 4); memcpy(dst + 4, &dy, 4); memcpy(dst + 8, &dz, 4);
+    for (int i = 0; i < 8; i++) dst[12 + i] = (b >> i) & 1u ? 0x80 : 0x00;
+}
+void metal_get_cursor(int *x, int *y){
+    mouse_take();
+    pthread_mutex_lock(&g_ms_mx);
+    if (x) *x = g_view_x;
+    if (y) *y = g_view_y;
+    pthread_mutex_unlock(&g_ms_mx);
+}
+static void ios_mouse_button(int down){
+    unsigned was = atomic_load(&g_mouse_btn) & 1u;
+    if (!!was == !!down) return;
+    if (down) atomic_fetch_or(&g_mouse_btn, 1u); else atomic_fetch_and(&g_mouse_btn, ~1u);
+    mouse_step((MouseStep){ .kind = MS_BTN, .btn = atomic_load(&g_mouse_btn) });
+    kbd_post(down ? 0x0201u : 0x0202u, mouse_mk(0), mouse_lp());        /* WM_LBUTTONDOWN/UP */
+}
+static void ios_mouse_release_all(void){
+    ios_mouse_button(0);
+    atomic_store(&g_mouse_btn, 0u);
+    pthread_mutex_lock(&g_ms_mx);
+    g_ms_n = 0; g_view_btn = 0; g_view_x = atomic_load(&g_mouse_x); g_view_y = atomic_load(&g_mouse_y);
+    pthread_mutex_unlock(&g_ms_mx);
+}
+/* a point in the view (UIKit points, top-left origin) -> the game's cursor */
+static void ios_touch_point(CGPoint p, int landing){
+    int gx, gy;
+    mouse_from_point(p.x, atomic_load(&g_cont_h) - p.y, &gx, &gy);    /* mouse_from_point is bottom-left */
+    unsigned lw = 1280, lh = 720; metal_game_size(&lw, &lh);
+    if (!lw || !lh){ lw = 1280; lh = 720; }
+    int ox = atomic_load(&g_mouse_x), oy = atomic_load(&g_mouse_y);
+    if (landing){
+        double ux = lw / 640.0, uy = lh / 480.0;
+        if (fabs((double)gx - ox) < 2.0 * ux && fabs((double)gy - oy) < 2.0 * uy){
+            int h = (int)ceil(2.0 * ux), hx = gx + h <= (int)lw - 1 ? gx + h : gx - h;
+            mouse_step((MouseStep){ .kind = MS_HOP, .x = hx, .y = gy });
+        }
+    }
+    mouse_step((MouseStep){ .kind = MS_MOVE, .x = gx, .y = gy, .dx = gx - ox, .dy = gy - oy });
+    atomic_store(&g_mouse_x, gx); atomic_store(&g_mouse_y, gy);
+    kbd_post_mousemove(mouse_mk(0), mouse_lp());
+}
+/* a key pressed and let go by a gesture (two fingers = Escape) */
+static void ios_key_tap(unsigned dik){
+    kbd_set_key(KSRC_HOST, dik, 1);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 120 * NSEC_PER_MSEC), dispatch_get_main_queue(),
+                   ^{ kbd_set_key(KSRC_HOST, dik, 0); });
+}
+
+@interface NfsuView : UIView @end
+@implementation NfsuView {
+    __weak UITouch *_track;          /* the finger that drives the cursor */
+    int _multi;                      /* two or more fingers down: Escape sent, no cursor until all are up */
+}
++ (Class)layerClass { return [CAMetalLayer class]; }
+static NSUInteger live_touches(UIEvent *ev){
+    NSUInteger n = 0;
+    for (UITouch *t in ev.allTouches) if (t.phase != UITouchPhaseEnded && t.phase != UITouchPhaseCancelled) n++;
+    return n;
+}
+- (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (live_touches(event) >= 2){
+        if (!_multi){
+            _multi = 1;
+            if (_track){ _track = nil; ios_mouse_button(0); }
+            ios_key_tap(0x01);                                     /* DIK_ESCAPE */
+        }
+        return;
+    }
+    if (_multi || _track) return;
+    UITouch *t = touches.anyObject;
+    _track = t;
+    ios_touch_point([t locationInView:self], 1);
+    ios_mouse_button(1);
+}
+- (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
+    if (_track && [touches containsObject:_track]) ios_touch_point([_track locationInView:self], 0);
+}
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_track && [touches containsObject:_track]){
+        ios_touch_point([_track locationInView:self], 0);
+        ios_mouse_button(0);
+        _track = nil;
+    }
+    if (live_touches(event) == 0) _multi = 0;
+}
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    if (_track && [touches containsObject:_track]){ ios_mouse_button(0); _track = nil; }
+    if (live_touches(event) == 0) _multi = 0;
+}
+@end
+
+/* The game's surface follows the view: a rotation between the two landscape
+ * sides keeps the size; anything else (an iPad's Stage Manager window, a
+ * size class change) measures the screen again and resets the device. */
+static void ios_layout_changed(CGSize sz){
+    if (sz.width < 1.0 || sz.height < 1.0) return;
+    if (lround(sz.width) == atomic_load(&g_cont_w) && lround(sz.height) == atomic_load(&g_cont_h)) return;
+    CGFloat k = g_layer ? g_layer.contentsScale : 2.0;
+    atomic_store(&g_cont_w, (int)sz.width); atomic_store(&g_cont_h, (int)sz.height);
+    atomic_store(&g_fs_pw, (int)lround(sz.width * k)); atomic_store(&g_fs_ph, (int)lround(sz.height * k));
+    fprintf(stderr, "app: view %.0fx%.0f pt = %dx%d pixels -> device reset\n", (double)sz.width, (double)sz.height,
+            atomic_load(&g_fs_pw), atomic_load(&g_fs_ph));
+    com_request_reset();
+}
+@interface NfsuViewController : UIViewController @end
+@implementation NfsuViewController
+- (void)loadView {
+    NfsuView *v = [[NfsuView alloc] initWithFrame:CGRectZero];
+    v.multipleTouchEnabled = YES;
+    v.backgroundColor = [UIColor blackColor];
+    self.view = v;
+}
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+/* an edge swipe needs a second swipe to reach the system (Control Center,
+ * the Home gesture): steering on the on-screen stick runs into the edges */
+- (UIRectEdge)preferredScreenEdgesDeferringSystemGestures { return UIRectEdgeAll; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (void)viewDidLayoutSubviews { [super viewDidLayoutSubviews]; ios_layout_changed(self.view.bounds.size); }
+@end
+
+/* Vsync clock for the frame pacer (framerate.c), as on the Mac: a
+ * CADisplayLink asking for the screen's maximum rate (ProMotion needs
+ * CADisableMinimumFrameDurationOnPhone in Info.plist on an iPhone). */
+static void link_hz_note(double dur){
+    int hz = g_link_sim_hz > 0 ? g_link_sim_hz
+           : (dur > 0.001 && dur < 0.1) ? (int)lround(1.0 / dur) : 0;
+    static int cand = -1; static double since = 0;
+    double now = CACurrentMediaTime();
+    if (hz != cand){ cand = hz; since = now; return; }
+    if (hz == g_link_hz || now - since < 0.5) return;
+    if (g_link_hz || (hz && hz < g_screen_hz - 1))
+        fprintf(stderr, "metal: display link refresh %d Hz (screen reports %d Hz)\n", hz, g_screen_hz);
+    g_link_hz = hz;
+    display_hz_apply("display link");
+}
+@interface NfsuVsync : NSObject @end
+@implementation NfsuVsync
+- (void)tick:(CADisplayLink *)l { hfr_note_vsync(l.timestamp, l.duration); link_hz_note(l.duration); }
+@end
+static NfsuVsync *g_vs_obj;
+static CADisplayLink *g_vs_link;
+static void vsync_link_range(void){
+    if (!g_vs_link || g_screen_hz <= 0) return;
+    float m = (float)g_screen_hz;
+    g_vs_link.preferredFrameRateRange = CAFrameRateRangeMake(m, m, m);
+}
+static void vsync_link_start(void){
+    if (ENVC("NFSU2_NO_VSYNC_CLOCK")) return;
+    g_vs_obj = [NfsuVsync new];
+    g_vs_link = [CADisplayLink displayLinkWithTarget:g_vs_obj selector:@selector(tick:)];
+    [g_vs_link addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+    vsync_link_range();
+}
+
+/* --- the on-screen controller ----------------------------------------------
+ * Left stick to steer, RT gas, LT brake, A B X Y; the game's own pad layout
+ * (dinput_pad.c) applies.  Shown while no real controller is connected. */
+static GCVirtualController *g_vpad;
+static int g_vpad_on;
+static int real_pad_connected(void){
+    for (GCController *k in [GCController controllers])
+        if (k.extendedGamepad && (!g_vpad || k != g_vpad.controller)) return 1;
+    return 0;
+}
+static void vpad_update(const char *why){
+    if (!g_vpad) return;
+    int want = !real_pad_connected();
+    if (want == g_vpad_on) return;
+    g_vpad_on = want;
+    fprintf(stderr, "app: on-screen controller %s (%s)\n", want ? "shown" : "hidden", why);
+    if (want) [g_vpad connectWithReplyHandler:^(NSError *e){
+        if (e) fprintf(stderr, "app: on-screen controller: %s\n", e.localizedDescription.UTF8String); }];
+    else [g_vpad disconnect];
+}
+static void ios_vpad_start(void){
+    if (!gamepad_env_flag("NFSU2_TOUCH_PAD", 1)) return;
+    GCVirtualControllerConfiguration *cf = [GCVirtualControllerConfiguration new];
+    cf.elements = [NSSet setWithArray:@[ GCInputLeftThumbstick, GCInputButtonA, GCInputButtonB,
+                                         GCInputButtonX, GCInputButtonY, GCInputLeftTrigger, GCInputRightTrigger ]];
+    g_vpad = [[GCVirtualController alloc] initWithConfiguration:cf];
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:GCControllerDidConnectNotification object:nil queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *n){ (void)n; vpad_update("a controller connected"); }];
+    [nc addObserverForName:GCControllerDidDisconnectNotification object:nil queue:[NSOperationQueue mainQueue]
+                usingBlock:^(NSNotification *n){ (void)n; vpad_update("a controller disconnected"); }];
+    vpad_update("start");
+}
+
+static void ios_open_window(unsigned rw, unsigned rh){
+    g_win = g_ios_scene ? [[UIWindow alloc] initWithWindowScene:g_ios_scene]
+                        : [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    NfsuViewController *vc = [NfsuViewController new];
+    g_win.rootViewController = vc;
+    g_win.backgroundColor = [UIColor blackColor];
+    [g_win makeKeyAndVisible];
+    CAMetalLayer *l = (CAMetalLayer *)vc.view.layer;
+    l.device = g_dev;
+    l.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    l.framebufferOnly = NO;                  /* StretchRect reads the back buffer; frame dumps */
+    l.opaque = YES;
+    l.contentsGravity = kCAGravityResizeAspect;
+    { UIScreen *sc = ios_screen(); l.contentsScale = sc ? sc.nativeScale : 2.0; }
+    g_layer = l;
+    scr_cache();
+    win_apply_size(rw, rh);
+    vsync_link_start();
+    ios_vpad_start();
+}
+
+/* UIKit's events (touches, the scene's life, controllers, the main queue's
+ * blocks) are run-loop sources: run them until none is left, then go back to
+ * the frame loop.  The game is started from a run-loop timer (ios_app.m),
+ * never from a main-queue block: inside one, the run loop would not drain
+ * the main queue again (gamepad.m and metal_resize post there). */
+static void ios_pump(void){
+    while (CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true) == kCFRunLoopRunHandledSource) {}
+}
+
+/* The scene's life (ios_app.m).  Inactive (Control Center, a call) pauses
+ * the game the way losing focus does on Windows; in the background no frame
+ * is drawn at all, which iOS requires. */
+void metal_ios_active(int on){
+    if (!on){ kbdmac_release_all("scene inactive"); ios_mouse_release_all(); }
+    lifecycle_set_active(on, on ? "scene active" : "scene inactive");
+}
+void metal_ios_background(int bg){
+    atomic_store(&g_ios_bg, bg);
+    fprintf(stderr, "app: %s\n", bg ? "in the background: drawing stops" : "back in the foreground");
+}
+#endif /* TARGET_OS_IPHONE */
 
 /* Must be called on the main thread. Opens the window and runs the NSApp
  * loop; does not return (until the app quits).                          */
@@ -4635,6 +5130,11 @@ void metal_run_main_loop(void){
         metal_early_init();
         if (!g_dev) return;
 
+#if TARGET_OS_IPHONE
+        {   unsigned rw = g_want_w ? g_want_w : 1280u, rh = g_want_h ? g_want_h : 720u;
+            if (!g_want_w){ rw = 1280u; rh = 960u; metal_native_size(1280u, 960u, &rw, &rh); }
+            ios_open_window(rw, rh); }
+#else
         [NSApplication sharedApplication];
         /* NOFOCUS=1 (test runs): no Dock icon, no focus stealing; the window
          * opens behind.  The user's keyboard does not go to the test window. */
@@ -4757,6 +5257,7 @@ void metal_run_main_loop(void){
         else { [g_win makeKeyAndOrderFront:nil];
                [NSApp activateIgnoringOtherApps:YES]; }
         if (fs_pref_load()) [g_win toggleFullScreen:nil];
+#endif
 
         /* the draw resources were set up in metal_early_init() */
         fprintf(stderr, "metal: window open (%s), draw path %s\n",
@@ -4774,6 +5275,7 @@ void metal_run_main_loop(void){
                 atomic_store(&g_should_quit, 1); break; }
             lifecycle_tick();
             rt_free_pending();
+#if !TARGET_OS_IPHONE      /* the window and AppKit test hooks */
             /* FSFAKE=<frame>[,...]: fake a fullscreen transition as THE GAME
              * sees it, without touching the window (view = screen size, device
              * loss); real fullscreen is not reliable in the background (test). */
@@ -4962,8 +5464,12 @@ void metal_run_main_loop(void){
               if (ti < tn && atomic_load(&g_frames_drawn) >= tg[ti]){
                   ti++; fprintf(stderr, "app: FSTOGGLE frame %ld\n", atomic_load(&g_frames_drawn));
                   [g_win toggleFullScreen:nil]; } }
+#endif
             @autoreleasepool {
                 kbdmac_tick();                   /* synthesised keys (autotest ns*) into the queue */
+#if TARGET_OS_IPHONE
+                ios_pump();                      /* touches, scene and controller events */
+#else
                 NSEvent *ev;
                 while ((ev = [NSApp nextEventMatchingMask:NSEventMaskAny
                                                 untilDate:nil
@@ -5051,6 +5557,7 @@ void metal_run_main_loop(void){
                  * app never answers a Quit. */
                 [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                          beforeDate:[NSDate distantPast]];
+#endif
 
                 /* AUTOKEY=<dik>[,<dik>...]: periodic synthetic key presses to
                  * measure whether the game reacts to input. */
@@ -5138,6 +5645,9 @@ void metal_run_main_loop(void){
                 pthread_mutex_lock(&g_qlock); have_new = (g_ready >= 0);
                 pthread_mutex_unlock(&g_qlock);
                 if (!have_new && atomic_load(&g_frame_pending)) g_skip_empty++;
+#if TARGET_OS_IPHONE
+                if (atomic_load(&g_ios_bg)) have_new = 0;   /* no GPU work in the background */
+#endif
                 if (have_new && atomic_exchange(&g_frame_pending, 0)){
                     struct timespec _d0,_d1; clock_gettime(CLOCK_MONOTONIC,&_d0);
                     id<CAMetalDrawable> d = [g_layer nextDrawable];
@@ -6122,7 +6632,11 @@ void metal_run_main_loop(void){
                         int fc_px = fpscounter_on() && rb >= 0;
                         double fc_ppp = atomic_load(&g_cont_w) > 0 ? (double)d.texture.width / atomic_load(&g_cont_w) : 2.0;
                         unsigned fc_bw = 0, fc_bh = 0;
+#if TARGET_OS_IPHONE
+                        if (fc_px){ double bs = atomic_load(&g_scr_s100) / 100.0;
+#else
                         if (fc_px){ double bs = g_win ? [g_win backingScaleFactor] : 2.0;
+#endif
                             fc_bw = (unsigned)lround(atomic_load(&g_cont_w) * bs);
                             fc_bh = (unsigned)lround(atomic_load(&g_cont_h) * bs); }
                         if (fc_px && fpscounter_in_dumps()){

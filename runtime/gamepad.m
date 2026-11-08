@@ -23,6 +23,7 @@
  *   NFSU2_PAD_LOG=1             log controllers connecting and disconnecting */
 #import <Foundation/Foundation.h>
 #import <GameController/GameController.h>
+#include <TargetConditionals.h>
 #include <os/lock.h>
 #include <math.h>
 #include <stdio.h>
@@ -120,9 +121,11 @@ static void pick_active(void){
 static void setup(void){
     g_order = [NSMutableArray array];
     g_q = dispatch_queue_create("nfsu2.gamepad", DISPATCH_QUEUE_SERIAL);
+#if !TARGET_OS_IPHONE      /* macOS only: an app in the background on iOS is suspended */
     if (@available(macOS 11.3, *)){
         if (gamepad_env_flag("NFSU2_PAD_BACKGROUND", 0)) GCController.shouldMonitorBackgroundEvents = YES;
     }
+#endif
     NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
     [nc addObserverForName:GCControllerDidConnectNotification object:nil
         queue:[NSOperationQueue mainQueue] usingBlock:^(NSNotification *n){

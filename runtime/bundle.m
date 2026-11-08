@@ -18,8 +18,22 @@
  * The game folder is the user's own install and is only ever read:
  * fileio_set_readonly_root(1) makes the file layer refuse any write into it.
  * SPEED2.EXE must be the build the code was lifted from (v1.2 NA, SHA-256
- * below); any other build is refused.                                    */
+ * below); any other build is refused.
+ *
+ * iOS: the same, in the app's Documents folder, which the Files app shows
+ * as "On My iPhone > NFSU2" (UIFileSharingEnabled):
+ *   Documents/Game/        the player copies the game folder here (any one
+ *                          folder level below works too, find_under)
+ *   Documents/settings.ini, registry.txt, Overlay/ (saves), Logs/nfsu2.log
+ * There is no folder picker: without a game the app says where to put it
+ * (ios_app_message, runtime/ios_app.m).                                   */
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+void ios_app_message(const char *title, const char *msg);   /* ios_app.m */
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #import <CommonCrypto/CommonDigest.h>
 #include <string.h>
 #include <strings.h>
@@ -52,6 +66,14 @@ static int  g_bundled = -1;
  * links resolved: yes if it is ".../X.app/Contents/MacOS/Y".            */
 int app_is_bundled(void){
     if (g_bundled >= 0) return g_bundled;
+#if TARGET_OS_IPHONE
+    /* always an app: .../NFSU2.app/NFSU2, resources beside the executable */
+    snprintf(g_res_dir, sizeof g_res_dir, "%s", [[NSBundle mainBundle] bundlePath].UTF8String);
+    snprintf(g_exe_dir, sizeof g_exe_dir, "%s", g_res_dir);
+    snprintf(g_app_dir, sizeof g_app_dir, "%s", g_res_dir);
+    g_bundled = 1;
+    return 1;
+#endif
     char raw[1024]; uint32_t n = sizeof raw;
     if (_NSGetExecutablePath(raw, &n) != 0){ g_bundled = 0; return 0; }
     char real[1024];
@@ -88,6 +110,9 @@ static int no_ui(void){
 static void app_alert(const char *title, const char *msg){
     fprintf(stderr, "app: %s -- %s\n", title, msg);
     if (no_ui()) return;
+#if TARGET_OS_IPHONE
+    ios_app_message(title, msg);
+#else
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     [NSApp activateIgnoringOtherApps:YES];
@@ -96,6 +121,7 @@ static void app_alert(const char *title, const char *msg){
     [a setInformativeText:@(msg)];
     [a addButtonWithTitle:@"OK"];
     [a runModal];
+#endif
 }
 
 /* winsock.c, once per run, when nothing sent beyond this Mac has worked
@@ -110,10 +136,12 @@ void app_local_network_notice(void){
     const char *m = "macOS is not letting NFSU2 send anything on the local network, so the other players cannot "
                     "see your game and you cannot see theirs.\n\nTurn on NFSU2 in System Settings > Privacy & "
                     "Security > Local Network, then go back to the main menu and enter LAN again.";
-    if (!app_is_bundled() || no_ui()){
-        fprintf(stderr, "app: Local Network notice not shown (%s): %s\n", no_ui() ? "no UI in this run" : "not the app", t);
+    if (!app_is_bundled() || no_ui() || TARGET_OS_IPHONE){
+        fprintf(stderr, "app: Local Network notice not shown (%s): %s\n",
+                no_ui() ? "no UI in this run" : TARGET_OS_IPHONE ? "iOS asks for Local Network access itself" : "not the app", t);
         return;
     }
+#if !TARGET_OS_IPHONE
     fprintf(stderr, "app: Local Network notice shown: %s\n", t);
     NSString *ts = @(t), *ms = @(m);
     dispatch_async(dispatch_get_main_queue(), ^{
@@ -133,6 +161,7 @@ void app_local_network_notice(void){
         if (w) [a beginSheetModalForWindow:w completionHandler:done];
         else done([a runModal]);
     });
+#endif
 }
 
 /* ---- settings.ini ------------------------------------------------------- *
@@ -863,7 +892,11 @@ static void app_open_log(void){
     const char *ld = getenv("NFSU2_LOGDIR"), *home = getenv("HOME");
     if (ld && *ld) snprintf(dir, sizeof dir, "%s", ld);
     else if (getenv("NFSU2_APPSUPPORT")) snprintf(dir, sizeof dir, "%s/Logs", g_support);
+#if TARGET_OS_IPHONE
+    else snprintf(dir, sizeof dir, "%s/Logs", g_support);
+#else
     else if (home) snprintf(dir, sizeof dir, "%s/Library/Logs/NFSU2", home);
+#endif
     else return;
     mkdirs(dir);
     /* The HD build writes its own log, so two builds run side by side do not
@@ -892,6 +925,14 @@ static void app_set_defaults(void){
     setdef("SNDSYNC", "1");
     setdef("GPUVS", "1");
     setdef("NFSU2_READONLY_DATA", "1");   /* never write into the game folder */
+#if TARGET_OS_IPHONE
+    /* A phone renders at about 2 megapixels (the web build's 75% on a big
+     * phone, 2.3 of 3.8 MP on a Pro Max); an M-chip iPad gets the same cap
+     * until measured.  settings.ini NFSMAXPIX raises it. */
+    setdef("NFSMAXPIX", "2000000");
+    /* Documents/Game, where the Files app puts the folder the player copies */
+    { char g[1200]; snprintf(g, sizeof g, "%s/Game", g_support); mkdirs(g); setdef("NFSU2_DATA", g); }
+#endif
 }
 
 /* Save overlay for the file layer (boot.c): NFSU2_SAVEDIR, which app_setup
@@ -935,7 +976,11 @@ static void app_seed_registry(const char *reg){
 void app_setup(void){
     const char *as = getenv("NFSU2_APPSUPPORT"), *home = getenv("HOME");
     if (as && *as) snprintf(g_support, sizeof g_support, "%s", as);
+#if TARGET_OS_IPHONE
+    else snprintf(g_support, sizeof g_support, "%s/Documents", home ? home : "/tmp");
+#else
     else snprintf(g_support, sizeof g_support, "%s/Library/Application Support/NFSU2", home ? home : "/tmp");
+#endif
     mkdirs(g_support);
     snprintf(g_settings, sizeof g_settings, "%s/settings.ini", g_support);
     app_load_settings();
@@ -1018,6 +1063,10 @@ static int exe_ok(const char *exe, char *why, size_t wsz){
 
 /* Ask for the game folder.  0 = cancelled. */
 static int app_ask(char *out, size_t osz, const char *msg){
+#if TARGET_OS_IPHONE
+    (void)out; (void)osz; (void)msg;
+    return 0;                       /* no picker: the game goes into Documents/Game */
+#else
     NSOpenPanel *op = [NSOpenPanel openPanel];
     [op setCanChooseFiles:NO];
     [op setCanChooseDirectories:YES];
@@ -1028,6 +1077,7 @@ static int app_ask(char *out, size_t osz, const char *msg){
     if ([op runModal] != NSModalResponseOK) return 0;
     snprintf(out, osz, "%s", [[[op URL] path] UTF8String]);
     return 1;
+#endif
 }
 
 /* Find SPEED2.EXE: the command-line path (arg), else NFSU2_DATA
@@ -1061,6 +1111,11 @@ const char *app_find_game(const char *arg, int remember){
         fprintf(stderr, "app: no usable game folder and no UI (NFSU2_NO_UI/NOFOCUS): giving up\n");
         return NULL;
     }
+#if TARGET_OS_IPHONE
+    /* a wrong SPEED2.EXE is worth its own message; a missing one is app_no_game's */
+    if (why[0] && !strstr(why, "There is no SPEED2.EXE")) app_alert("Unsupported game version", why);
+    return NULL;
+#else
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     const char *msg = why[0] ? "Choose the Need for Speed Underground 2 folder (the one that contains SPEED2.EXE)."
@@ -1081,10 +1136,18 @@ const char *app_find_game(const char *arg, int remember){
         return found;
     }
     return NULL;
+#endif
 }
 
 /* When quitting without a game found, tell the user why. */
 void app_no_game(void){
+#if TARGET_OS_IPHONE
+    app_alert("Copy your game into the app",
+              "The game itself is not part of this app.  In the Files app, open On My iPhone (or iPad) > NFSU2 "
+              "and copy your Need for Speed Underground 2 folder (v1.2, the one with SPEED2.EXE) into the "
+              "folder named Game.  Then close this app and open it again.");
+    return;
+#endif
     app_alert("NFSU2 cannot start",
               "The game itself is not part of this app: it needs your own Need for Speed "
               "Underground 2 (v1.2) folder.  Open the app again to choose it, or set "

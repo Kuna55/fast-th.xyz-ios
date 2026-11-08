@@ -7,9 +7,14 @@
  *
  * The mixer converts to 44.1 kHz, 2 channel, 16-bit output; the source
  * buffers can differ in rate/channels (nearest-neighbour resampling). */
+#include <TargetConditionals.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <AudioUnit/AudioUnit.h>
+#if TARGET_OS_IPHONE
+#import <AVFoundation/AVFoundation.h>
+#else
 #import <CoreAudio/CoreAudio.h>
+#endif
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -494,7 +499,11 @@ static int au_start(const AudioStreamBasicDescription *f){
     AudioComponentDescription d;
     memset(&d, 0, sizeof d);
     d.componentType         = kAudioUnitType_Output;
+#if TARGET_OS_IPHONE
+    d.componentSubType      = kAudioUnitSubType_RemoteIO;    /* follows the session's route */
+#else
     d.componentSubType      = kAudioUnitSubType_DefaultOutput;
+#endif
     d.componentManufacturer = kAudioUnitManufacturer_Apple;
     AudioComponent comp = AudioComponentFindNext(NULL, &d);
     if (!comp) return 0;
@@ -526,6 +535,15 @@ fail:
 static AudioStreamBasicDescription g_fmt;
 static dispatch_queue_t g_audio_q;
 static uint64_t g_dev_changes = 0, g_au_restarts = 0, g_au_rebuilds = 0;
+#if TARGET_OS_IPHONE
+/* iOS: the session's current route (speaker, headphones, AirPods ...) */
+static void log_default_device(const char *why){
+    @autoreleasepool {
+        AVAudioSessionPortDescription *o = [AVAudioSession sharedInstance].currentRoute.outputs.firstObject;
+        fprintf(stderr, "sound: output route: \"%s\" (%s)\n", o ? o.portName.UTF8String : "?", why);
+    }
+}
+#else
 static void log_default_device(const char *why){
     AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultOutputDevice,
                                      kAudioObjectPropertyScopeGlobal, AUDIO_ELEM_MAIN };
@@ -540,6 +558,7 @@ static void log_default_device(const char *why){
     }
     fprintf(stderr, "sound: default output device: \"%s\" (id %u, %s)\n", name, (unsigned)dev, why);
 }
+#endif
 static int null_out_start(const char *why);
 static void null_out_stop(void);
 /* the silent clock stands in for an output unit that could not be rebuilt:
@@ -594,6 +613,43 @@ void audio_device_changed(const char *why){
     dispatch_async(g_audio_q, ^{ log_default_device(why); });
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_MSEC), g_audio_q, ^{ au_check(rebuild); });
 }
+#if TARGET_OS_IPHONE
+/* iOS: the audio session.  Ambient: the game's sound mixes with other apps'
+ * and follows the silent switch, as games usually do; NFSU2_AUDIO_PLAYBACK=1
+ * plays through the silent switch instead.  A route change (headphones,
+ * AirPods) or the end of an interruption (a call, Siri) goes through the
+ * same check as a device change on the Mac: the unit is restarted if it
+ * stopped, rebuilt if that fails. */
+static void ios_audio_session(void){
+    AVAudioSession *as = [AVAudioSession sharedInstance];
+    const char *e = getenv("NFSU2_AUDIO_PLAYBACK");
+    NSError *err = nil;
+    [as setCategory:(e && *e && *e != '0') ? AVAudioSessionCategoryPlayback : AVAudioSessionCategoryAmbient error:&err];
+    if (err) fprintf(stderr, "sound: audio session category: %s\n", err.localizedDescription.UTF8String);
+    [as setPreferredSampleRate:OUT_RATE error:nil];
+    [as setPreferredIOBufferDuration:512.0 / OUT_RATE error:nil];
+    err = nil;
+    if (![as setActive:YES error:&err])
+        fprintf(stderr, "sound: audio session could not be activated: %s\n", err ? err.localizedDescription.UTF8String : "?");
+}
+static void watch_default_device(void){
+    g_audio_q = dispatch_queue_create("nfsu2.audio.device", DISPATCH_QUEUE_SERIAL);
+    NSNotificationCenter *nc = [NSNotificationCenter defaultCenter];
+    [nc addObserverForName:AVAudioSessionRouteChangeNotification object:nil queue:nil
+                usingBlock:^(NSNotification *n){ (void)n; audio_device_changed("route changed"); }];
+    [nc addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:nil usingBlock:^(NSNotification *n){
+        NSNumber *t = n.userInfo[AVAudioSessionInterruptionTypeKey];
+        if (t && t.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded){
+            [[AVAudioSession sharedInstance] setActive:YES error:nil];
+            audio_device_changed("interruption ended");
+        } }];
+    [nc addObserverForName:AVAudioSessionMediaServicesWereResetNotification object:nil queue:nil
+                usingBlock:^(NSNotification *n){ (void)n; g_dev_changes++;
+                    fprintf(stderr, "sound: media services were reset: rebuilding the output unit\n");
+                    dispatch_async(g_audio_q, ^{ ios_audio_session(); au_check(1); }); }];
+    log_default_device("at start");
+}
+#else
 static void watch_default_device(void){
     g_audio_q = dispatch_queue_create("nfsu2.audio.device", DISPATCH_QUEUE_SERIAL);
     AudioObjectPropertyAddress a = { kAudioHardwarePropertyDefaultOutputDevice,
@@ -603,6 +659,8 @@ static void watch_default_device(void){
             audio_device_changed("system default changed"); });
     log_default_device("at start");
 }
+
+#endif
 
 /* No sound device (settings.ini "sound = off", NOSOUND=1, or no output unit
  * could be opened): a thread plays the mixer into nothing at the device's
@@ -676,6 +734,9 @@ void audio_init(void){
     f.mFramesPerPacket  = 1;
     f.mBytesPerFrame    = OUT_CH * sizeof(int16_t);
     f.mBytesPerPacket   = f.mBytesPerFrame;
+#if TARGET_OS_IPHONE
+    ios_audio_session();
+#endif
     /* SNDBACKEND=queue goes back to the old (high-latency) path. */
     { const char *e = getenv("SNDBACKEND");
       if (!(e && *e == 'q') && au_start(&f)){

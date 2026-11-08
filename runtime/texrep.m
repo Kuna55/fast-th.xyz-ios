@@ -64,7 +64,12 @@
  * xxhash.h: XXH3 by Yann Collet, BSD 2-Clause (vendored, v0.8.4). */
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#import <UIKit/UIKit.h>
+#else
 #import <Cocoa/Cocoa.h>
+#endif
 #include "cpu.h"
 #include "game.h"
 #include "texrep.h"
@@ -94,7 +99,9 @@ uint8_t g_texrep_k[TEXREP_MAXTEX];
 static unsigned g_main_live;                       /* entries in g_texrep_tex */
 static _Atomic int g_shown = 1;                    /* menu item / autotest "texrep" */
 static _Atomic int g_pack_live;                    /* a pack is indexed (g_active), for the main thread */
+#if !TARGET_OS_IPHONE
 static NSMenuItem *g_menu_item;                    /* main thread: the hidden menu item, until g_pack_live */
+#endif
 
 /* ---- configuration (guest thread, first hook call) ---------------------- */
 static int g_init, g_active, g_dumping;            /* g_active: a pack is indexed */
@@ -332,6 +339,15 @@ static void tr_init(void){
         g_dumping = 1;
     }
     int want = texrep_wanted();
+#if TARGET_OS_IPHONE
+    /* the packs are BC1-3/BC7 DDS: a GPU without BC formats (an iPhone) cannot use them */
+    if (want){
+        id<MTLDevice> dv2 = metal_device();
+        int bc = 0;
+        if (@available(iOS 16.4, *)) bc = dv2 && [dv2 supportsBCTextureCompression];
+        if (!bc){ fprintf(stderr, "[texrep] texture packs need BC texture formats, which this GPU lacks: off\n"); want = 0; }
+    }
+#endif
     if (want){
         resolve_dir(getenv("NFSU2_TEXPACK"), "default", g_packdir, sizeof g_packdir);
         const char *pv = getenv("NFSU2_TEXPARTS");
@@ -882,10 +898,12 @@ void texrep_main_frame(id<MTLCommandQueue> q){
     free(ops);
     if (cb){ [bl endEncoding]; [cb commit]; }       /* before this frame's command buffer */
     g_texrep_frame_on = g_main_live && atomic_load(&g_shown);
+#if !TARGET_OS_IPHONE
     if (g_menu_item && atomic_load(&g_pack_live)){
         [g_menu_item setHidden:NO]; g_menu_item = nil;
         fprintf(stderr, "[texrep] app menu: \"Upscaled Textures\" (Cmd-T) shown\n");
     }
+#endif
 }
 /* sampler key for a replaced texture (metal.m samp_for decodes bits 15-17):
  * where the game's sampler has no mip filter it read only the original's
@@ -906,6 +924,7 @@ void texrep_set_shown(int on){
     fprintf(stderr, "[texrep] upscaled textures %s\n", v ? "shown" : "hidden (the game's own)");
 }
 int texrep_shown(void){ return atomic_load(&g_shown); }
+#if !TARGET_OS_IPHONE      /* iOS: no menu bar; the pack shows (texrep_set_shown, settings.ini) */
 @interface TexrepMenuTarget : NSObject
 - (void)toggle:(NSMenuItem *)it;
 @end
@@ -934,6 +953,8 @@ void texrep_add_menu(NSMenu *m){
     [it setHidden:YES];                       /* hidden items get no key equivalent */
     g_menu_item = it;
 }
+
+#endif
 
 /* [status] line fragment (autotest.c) while a pack is in use: replacement
  * memory now / its peak and the loaded replacements; nothing otherwise */
