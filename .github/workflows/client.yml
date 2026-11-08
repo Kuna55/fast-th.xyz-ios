@@ -1,0 +1,46 @@
+# Build the nfsu2.xyz client app (client/) on a GitHub Mac, unsigned, and put
+# NFSU2-unsigned.ipa on the "client" release of this (private) repository.
+# Sign it when you install it: Sideloadly or AltStore with your Apple ID.
+name: client
+on:
+  push:
+    branches: [main]
+    paths: ['client/**', .github/workflows/client.yml]
+  workflow_dispatch:
+permissions:
+  contents: write          # the release that carries the .ipa
+concurrency: { group: client, cancel-in-progress: true }
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Xcode project
+        run: |
+          xcodebuild -version
+          brew install xcodegen
+          cd client && xcodegen
+      - name: Build (unsigned)
+        run: |
+          cd client
+          xcodebuild -project NFSU2Client.xcodeproj -scheme NFSU2Client -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            CURRENT_PROJECT_VERSION=${{ github.run_number }} build | tail -40
+          test -d build/Build/Products/Release-iphoneos/NFSU2.app
+      - name: Package the .ipa
+        run: |
+          cd client
+          mkdir -p Payload && cp -R build/Build/Products/Release-iphoneos/NFSU2.app Payload/
+          zip -qry NFSU2-unsigned.ipa Payload
+          ls -l NFSU2-unsigned.ipa
+      - uses: actions/upload-artifact@v4
+        with: { name: NFSU2-unsigned-ipa, path: client/NFSU2-unsigned.ipa }
+      - name: Release "client"
+        env: { GH_TOKEN: '${{ github.token }}' }
+        run: |
+          N="build ${{ github.run_number }} ($(git rev-parse --short HEAD))"
+          gh release view client >/dev/null 2>&1 || gh release create client --prerelease --title "iOS client" --notes "Unsigned: install with Sideloadly or AltStore (see client/README.md)."
+          gh release upload client client/NFSU2-unsigned.ipa --clobber
+          gh release edit client --notes "Unsigned, $N: install with Sideloadly or AltStore (see client/README.md)."

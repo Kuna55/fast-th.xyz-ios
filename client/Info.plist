@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>      <string>en</string>
+  <key>CFBundleExecutable</key>             <string>$(EXECUTABLE_NAME)</string>
+  <key>CFBundleIdentifier</key>             <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+  <key>CFBundleInfoDictionaryVersion</key>  <string>6.0</string>
+  <key>CFBundleName</key>                   <string>$(PRODUCT_NAME)</string>
+  <key>CFBundleDisplayName</key>            <string>NFSU2</string>
+  <key>CFBundlePackageType</key>            <string>APPL</string>
+  <key>CFBundleShortVersionString</key>     <string>$(MARKETING_VERSION)</string>
+  <key>CFBundleVersion</key>                <string>$(CURRENT_PROJECT_VERSION)</string>
+  <key>LSRequiresIPhoneOS</key>             <true/>
+  <key>LSApplicationCategoryType</key>      <string>public.app-category.racing-games</string>
+  <key>UILaunchScreen</key>                 <dict/>
+  <key>UIApplicationSceneManifest</key>
+  <dict>
+    <key>UIApplicationSupportsMultipleScenes</key> <false/>
+    <key>UISceneConfigurations</key>
+    <dict>
+      <key>UIWindowSceneSessionRoleApplication</key>
+      <array>
+        <dict>
+          <key>UISceneConfigurationName</key>  <string>Game</string>
+          <key>UISceneDelegateClassName</key>  <string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+        </dict>
+      </array>
+    </dict>
+  </dict>
+  <!-- the page plays sideways (touch controls over the game) and upright (a 4:5 picture, controls below) -->
+  <key>UISupportedInterfaceOrientations</key>
+  <array>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationPortrait</string>
+  </array>
+  <key>UISupportedInterfaceOrientations~ipad</key>
+  <array>
+    <string>UIInterfaceOrientationLandscapeRight</string>
+    <string>UIInterfaceOrientationLandscapeLeft</string>
+    <string>UIInterfaceOrientationPortrait</string>
+    <string>UIInterfaceOrientationPortraitUpsideDown</string>
+  </array>
+  <key>UIRequiresFullScreen</key>           <true/>
+  <key>UIStatusBarHidden</key>              <true/>
+  <key>UIViewControllerBasedStatusBarAppearance</key> <true/>
+  <key>CADisableMinimumFrameDurationOnPhone</key> <true/>
+  <!-- Downloads (the log, save backups) visible in Files > On My iPhone > NFSU2 -->
+  <key>UIFileSharingEnabled</key>           <true/>
+  <key>LSSupportsOpeningDocumentsInPlace</key> <true/>
+  <!-- controllers reach the page; Game Mode on iOS 18+ -->
+  <key>GCSupportsControllerUserInteraction</key> <true/>
+  <key>GCSupportedGameControllers</key>
+  <array><dict><key>ProfileName</key><string>ExtendedGamepad</string></dict></array>
+  <key>GCSupportsGameMode</key>             <true/>
+  <key>LSApplicationQueriesSchemes</key>    <array><string>discord</string></array>
+</dict>
+</plist>
