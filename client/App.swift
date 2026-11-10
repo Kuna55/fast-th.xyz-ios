@@ -1,4 +1,4 @@
-// NFSU2 client for iOS: nfsu2.xyz in a full-screen web view, as nfsu2desktop
+// NFSU2 client for iOS: fast-th.xyz in a full-screen web view, as nfsu2desktop
 // is on Windows.  The game, its saves and online play are the website's; this
 // app adds what a Safari tab or a Home Screen icon lacks or makes awkward:
 //   - full screen without browser bars, the Home indicator hidden and edge
@@ -11,16 +11,25 @@
 //   - links to other sites open in Safari, downloads (the log, save backups)
 //     go to Files > NFSU2 > Downloads, the page's dialogs (alert, confirm,
 //     prompt) show as iOS alerts, and a crashed page reloads.
-// Unofficial: not made or endorsed by nfsu2.xyz or Electronic Arts.
+// Unofficial: not made or endorsed by fast-th.xyz or Electronic Arts.
 import UIKit
 import WebKit
 import AVFoundation
 
-let siteURL = URL(string: "https://nfsu2.xyz/")!
+// The one place the site's domain is set.  If fast-th.xyz redirects to another
+// domain (CDN, login page), add that domain to extraSiteHosts so it stays in the app.
+let siteHost = "fast-th.xyz"
+let extraSiteHosts: [String] = []
+let siteURL = URL(string: "https://\(siteHost)/")!
+
+func isSiteHost(_ host: String) -> Bool {
+    let h = host.lowercased()
+    return ([siteHost] + extraSiteHosts).contains { h == $0 || h.hasSuffix("." + $0) }
+}
 
 func isSite(_ url: URL) -> Bool {
-    guard let h = url.host?.lowercased() else { return false }
-    return h == "nfsu2.xyz" || h.hasSuffix(".nfsu2.xyz")
+    guard let h = url.host else { return false }
+    return isSiteHost(h)
 }
 
 @main
@@ -141,7 +150,7 @@ final class GameViewController: UIViewController, WKNavigationDelegate, WKUIDele
         <!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
         <body style="background:#0e1014;color:#eee;font:17px -apple-system,sans-serif;display:flex;
           align-items:center;justify-content:center;height:100vh;margin:0;text-align:center">
-        <div><p style="font-size:22px;font-weight:600">nfsu2.xyz could not be reached</p>
+        <div><p style="font-size:22px;font-weight:600">\(siteHost) could not be reached</p>
         <p style="color:#aaa">\(esc)</p>
         <p><a href="nfsu2-retry://" style="display:inline-block;padding:12px 24px;border-radius:8px;
           background:#c8f088;color:#111;text-decoration:none;font-weight:600">Try again</a></p></div>
@@ -180,8 +189,7 @@ final class GameViewController: UIViewController, WKNavigationDelegate, WKUIDele
     func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                  initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                  decisionHandler: @escaping (WKPermissionDecision) -> Void) {
-        let h = origin.host.lowercased()
-        decisionHandler(h == "nfsu2.xyz" || h.hasSuffix(".nfsu2.xyz") ? .prompt : .deny)
+        decisionHandler(isSiteHost(origin.host) ? .prompt : .deny)
     }
 
     // ---- downloads: into Documents/Downloads (Files > On My iPhone > NFSU2) ----
