@@ -88,7 +88,7 @@ final class GameViewController: UIViewController, WKNavigationDelegate, WKUIDele
         let w = WKWebView(frame: .zero, configuration: cfg)
         w.navigationDelegate = self
         w.uiDelegate = self
-        w.isOpaque = false
+        w.isOpaque = true
         w.backgroundColor = .black
         w.scrollView.backgroundColor = .black
         w.scrollView.contentInsetAdjustmentBehavior = .never   // the page lays itself out to the screen's edges
