@@ -2,7 +2,7 @@
 
 *Need for Speed: Underground 2* on iOS, in two forms:
 
-- **The client** ([`client/`](client/README.md)): [nfsu2.xyz](https://nfsu2.xyz/) as a full-screen iPhone and iPad
+- **The client** ([`client/`](client/README.md)): [fast-th.xyz](https://fast-th.xyz/) as a full-screen iPhone and iPad
   app. You play the website's game with its saves and its online world: free roam, races and crews with everyone
   else on nfsu2.xyz. It is what [nfsu2desktop](https://github.com/DJTOMATO/nfsu2desktop) is on Windows. This is the
   one to use.
@@ -10,7 +10,7 @@
   without a browser. It has no online play, needs a Mac and a paid Apple developer account to build and install, and
   has not been run yet.
 
-Both are unofficial. Neither is made or endorsed by nfsu2.xyz or Electronic Arts.
+Both are unofficial. Neither is made or endorsed by fast-th.xyz or Electronic Arts.
 
 ## The client
 
@@ -73,7 +73,7 @@ nfsu2-web's own GitHub workflows (tests, server images) are turned off in this r
 ## Credits
 
 - **The game on the web and the native port:** [nfsu2-web](https://github.com/th0mk/nfsu2-web) by th0mk, which runs
-  [nfsu2.xyz](https://nfsu2.xyz/).
+  [fast-th.xyz](https://fast-th.xyz/).
 - **The recompilation it builds on:** Talha Müderrisoğlu's [NFSU2Recomp](https://github.com/TalhaMudo/NFSU2Recomp),
   after the method of [N64: Recompiled](https://github.com/N64Recomp/N64Recomp) and
   [XenonRecomp](https://github.com/hedge-dev/XenonRecomp).
