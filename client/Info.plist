@@ -45,7 +45,7 @@
   <key>UIRequiresFullScreen</key>           <true/>
   <key>UIStatusBarHidden</key>              <true/>
   <key>UIViewControllerBasedStatusBarAppearance</key> <true/>
-  <key>CADisableMinimumFrameDurationOnPhone</key> <true/>
+  <key>CADisableMinimumFrameDurationOnPhone</key> <false/>
   <!-- Downloads (the log, save backups) visible in Files > On My iPhone > NFSU2 -->
   <key>UIFileSharingEnabled</key>           <true/>
   <key>LSSupportsOpeningDocumentsInPlace</key> <true/>
